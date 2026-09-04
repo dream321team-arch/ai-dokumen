@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Document Checker & Legal Drafter</title>
+  <meta name="description" content="Aplikasi pemeriksaan kepatuhan pedoman, validasi hierarki hukum, dan ejaan/tanda baca otomatis berbasis AI">
+  <!-- Font Awesome 6 -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <!-- Marked.js & DOMPurify for rich markdown formatting -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.5/purify.min.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+  <!-- Header & Navigation -->
+  <header>
+    <div class="header-container">
+      <div class="logo-group">
+        <div class="logo-icon">
+          <i class="fa-solid fa-scale-balanced"></i>
+        </div>
+        <div>
+          <div class="logo-title">AI Document Checker</div>
+          <div class="logo-subtitle">Compliance & Legal Drafting Assistant</div>
+        </div>
+      </div>
+
+      <nav class="nav-tabs">
+        <button class="nav-btn active" onclick="switchTab('tab-check')">
+          <i class="fa-solid fa-file-circle-check"></i> Pemeriksaan
+        </button>
+        <button class="nav-btn" onclick="switchTab('tab-pedoman')">
+          <i class="fa-solid fa-book-bookmark"></i> Dokumen Pedoman
+        </button>
+        <button class="nav-btn" onclick="switchTab('tab-history')">
+          <i class="fa-solid fa-clock-rotate-left"></i> Riwayat Laporan
+        </button>
+      </nav>
+
+      <!-- Right Header Actions: Status -->
+      <div class="header-actions">
+        <div class="system-status" id="system-status-indicator">
+          <div class="status-dot"></div>
+          <span id="status-text">Menghubungkan...</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- TAB 1: PEMERIKSAAN DOKUMEN -->
+    <section id="tab-check" class="tab-panel active">
+
+      <!-- Executive Compliance Score Banner -->
+      <div class="score-banner" id="score-banner" style="display: none;">
+        <div class="score-main">
+          <div class="score-circle-wrapper">
+            <div class="score-circle" id="score-circle-value">--</div>
+            <div class="score-grade-badge" id="score-grade-badge">-</div>
+          </div>
+          <div class="score-details">
+            <div class="score-title">Skor Kepatuhan & Kualitas Naskah</div>
+            <div class="score-predicate" id="score-predicate-text">Menganalisis naskah...</div>
+            <div class="score-sub-pills">
+              <span class="sub-pill"><i class="fa-solid fa-scale-unbalanced-flip"></i> Pedoman: <strong id="sub-score-pedoman">-%</strong></span>
+              <span class="sub-pill"><i class="fa-solid fa-spell-check"></i> Ejaan: <strong id="sub-score-ejaan">-%</strong></span>
+              <span class="sub-pill"><i class="fa-solid fa-quote-right"></i> Tanda Baca & Kosa Kata: <strong id="sub-score-punct">-%</strong></span>
+              <span class="sub-pill"><i class="fa-solid fa-sitemap"></i> Struktur UU: <strong id="sub-score-struct">-%</strong></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="score-actions">
+          <div class="dropdown-export">
+            <button class="btn btn-primary" onclick="toggleExportMenu()">
+              <i class="fa-solid fa-download"></i> Export Dokumen <i class="fa-solid fa-chevron-down" style="font-size: 0.75rem;"></i>
+            </button>
+            <div class="dropdown-export-content" id="export-dropdown-content">
+              <a href="javascript:void(0)" onclick="downloadExport('clean')">
+                <i class="fa-solid fa-file-word" style="color: #2563eb;"></i> Naskah Bersih (Word .docx)
+              </a>
+              <a href="javascript:void(0)" onclick="downloadExport('track_changes')">
+                <i class="fa-solid fa-highlighter" style="color: #ea580c;"></i> Word Mode Track Changes (Coret/Tambah)
+              </a>
+              <a href="javascript:void(0)" onclick="downloadExport('audit_report')">
+                <i class="fa-solid fa-file-invoice" style="color: #16a34a;"></i> Laporan Audit Eksekutif (.docx)
+              </a>
+              <a href="javascript:void(0)" onclick="exportJSONReport()">
+                <i class="fa-solid fa-code" style="color: #64748b;"></i> Data Mentah (JSON)
+              </a>
+            </div>
+          </div>
+
+          <button class="btn btn-secondary" onclick="toggleAssistantDrawer()">
+            <i class="fa-solid fa-robot"></i> Tanya Asisten AI
+          </button>
+        </div>
+      </div>
+
+      <!-- Stats Grid -->
+      <div class="stats-grid" id="stats-summary" style="display: none;">
+        <div class="stat-card">
+          <div class="stat-icon total"><i class="fa-solid fa-layer-group"></i></div>
+          <div class="stat-info">
+            <h4>Total Blok</h4>
+            <div class="stat-value" id="stat-total">0</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon sesuai"><i class="fa-solid fa-circle-check"></i></div>
+          <div class="stat-info">
+            <h4>Sesuai</h4>
+            <div class="stat-value text-success" id="stat-sesuai">0</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon revisi"><i class="fa-solid fa-triangle-exclamation"></i></div>
+          <div class="stat-info">
+            <h4>Pedoman/UU</h4>
+            <div class="stat-value text-danger" id="stat-revisi">0</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon ejaan"><i class="fa-solid fa-spell-check"></i></div>
+          <div class="stat-info">
+            <h4>Ejaan & Tanda Baca</h4>
+            <div class="stat-value text-warning" id="stat-ejaan">0</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon span-total"><i class="fa-solid fa-bug"></i></div>
+          <div class="stat-info">
+            <h4>Total Kesalahan</h4>
+            <div class="stat-value text-info" id="stat-span-total">0</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon tanda-baca"><i class="fa-solid fa-quote-right"></i></div>
+          <div class="stat-info">
+            <h4>Tanda Baca</h4>
+            <div class="stat-value text-orange" id="stat-err-tanda-baca">0</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon kosa-kata"><i class="fa-solid fa-book-open-reader"></i></div>
+          <div class="stat-info">
+            <h4>Kosa Kata</h4>
+            <div class="stat-value text-purple" id="stat-err-kosa-kata">0</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon struct-alert"><i class="fa-solid fa-paragraph"></i></div>
+          <div class="stat-info">
+            <h4>Kalimat Panjang</h4>
+            <div class="stat-value text-slate" id="stat-long-sentences">0</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Drag & Drop File Upload -->
+      <div class="upload-card" id="drop-zone" onclick="document.getElementById('doc-file-input').click()">
+        <input type="file" id="doc-file-input" class="file-input" accept=".pdf,.docx,.doc,.txt,.md,.rtf,.odt" onchange="handleFileSelect(event)">
+        <div class="upload-icon-wrapper">
+          <i class="fa-solid fa-cloud-arrow-up"></i>
+        </div>
+        <h3>Unggah Dokumen (DOCX, DOC, PDF, TXT, RTF, MD)</h3>
+        <p>Tarik & lepaskan file dokumen di sini, atau klik untuk memilih file dari komputer</p>
+        <div style="margin-top: 0.75rem; display: flex; justify-content: center; gap: 0.5rem; flex-wrap: wrap;">
+          <span class="format-badge"><i class="fa-solid fa-file-word" style="color: #2563eb;"></i> DOCX / DOC</span>
+          <span class="format-badge"><i class="fa-solid fa-file-pdf" style="color: #dc2626;"></i> PDF</span>
+          <span class="format-badge"><i class="fa-solid fa-file-lines" style="color: #475569;"></i> TXT / MD</span>
+          <span class="format-badge"><i class="fa-solid fa-file-signature" style="color: #d97706;"></i> RTF / ODT</span>
+        </div>
+      </div>
+
+      <!-- Loading Loader -->
+      <div class="progress-container" id="loading-container">
+        <div class="spinner"></div>
+        <h4 id="loading-title">Sedang Memproses Pemeriksaan Dokumen...</h4>
+        <p id="loading-desc" style="color: var(--text-muted); font-size: 0.875rem; margin-top: 0.5rem;">
+          Mengekstrak teks, analisis kepatuhan pedoman, validasi struktur UU, serta ejaan & tanda baca...
+        </p>
+      </div>
+
+      <!-- Filter Controls & Turnitin Split View Results -->
+      <div id="results-wrapper" style="display: none;">
+
+        <!-- Legend & Batch Action Bar -->
+        <div class="toolbar-flex">
+          <div class="legend-bar">
+            <span class="legend-title"><i class="fa-solid fa-palette"></i> Penanda:</span>
+            <div class="legend-item"><span class="legend-swatch swatch-pedoman"></span> Pedoman/UU</div>
+            <div class="legend-item"><span class="legend-swatch swatch-ejaan"></span> Ejaan</div>
+            <div class="legend-item"><span class="legend-swatch swatch-tanda-baca"></span> Tanda Baca</div>
+            <div class="legend-item"><span class="legend-swatch swatch-kosa-kata"></span> Kosa Kata</div>
+          </div>
+
+          <div class="batch-actions">
+            <button class="btn btn-secondary btn-sm" onclick="acceptAllRevisions()">
+              <i class="fa-solid fa-check-double text-success"></i> Terima Semua Usulan
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="rejectAllRevisions()">
+              <i class="fa-solid fa-xmark text-danger"></i> Tolak Semua Usulan
+            </button>
+          </div>
+        </div>
+
+        <div class="filter-bar">
+          <div class="filter-pills">
+            <button class="pill-btn active" onclick="filterResults('all')" id="filter-all">
+              <i class="fa-solid fa-list-ul"></i> Semua Blok
+            </button>
+            <button class="pill-btn" onclick="filterResults('perlu_revisi')" id="filter-revisi">
+              <i class="fa-solid fa-triangle-exclamation"></i> Pedoman/UU
+            </button>
+            <button class="pill-btn" onclick="filterResults('ejaan_tanda_baca')" id="filter-ejaan">
+              <i class="fa-solid fa-spell-check"></i> Ejaan & Tanda Baca
+            </button>
+            <button class="pill-btn" onclick="filterResults('sesuai')" id="filter-sesuai">
+              <i class="fa-solid fa-circle-check"></i> Sesuai
+            </button>
+            <button class="pill-btn" onclick="filterResults('tidak_ditemukan_rujukan')" id="filter-tidak">
+              <i class="fa-solid fa-circle-question"></i> Tanpa Rujukan
+            </button>
+          </div>
+        </div>
+
+        <!-- Turnitin Split Screen View Container -->
+        <div class="turnitin-split-container">
+          <!-- Left: Document Reader View -->
+          <div class="doc-reader-panel">
+            <div class="panel-header">
+              <span class="panel-title"><i class="fa-solid fa-file-lines"></i> Dokumen Pembaca (Turnitin View)</span>
+              <span id="doc-title-badge" class="badge-info">dokumen</span>
+            </div>
+            <div class="doc-reader-content" id="document-reader-view"></div>
+          </div>
+
+          <!-- Right: Interactive Feedback Sidebar Panel with Accept/Reject -->
+          <div class="feedback-sidebar-panel">
+            <div class="panel-header">
+              <span class="panel-title"><i class="fa-solid fa-clipboard-check"></i> Umpan Balik & Interaksi Revisi</span>
+              <span id="issue-count-badge" class="badge-count">0 Masalah</span>
+            </div>
+            <div class="sidebar-cards-container" id="blocks-container"></div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- TAB 2: DOKUMEN PEDOMAN (RULES) -->
+    <section id="tab-pedoman" class="tab-panel">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem;">
+        <div>
+          <h2>Dokumen Pedoman (Reference Guidelines)</h2>
+          <p style="color: var(--text-muted); font-size: 0.9rem;">Kelola file pedoman (DOCX, PDF, TXT, MD, dll.) sebagai acuan aturan pemeriksaan kepatuhan, tanda baca, dan kosa kata.</p>
+        </div>
+        <div style="display: flex; gap: 0.75rem;">
+          <button class="btn btn-secondary" onclick="document.getElementById('rule-file-input').click()">
+            <i class="fa-solid fa-plus"></i> Tambah Dokumen Pedoman
+          </button>
+          <input type="file" id="rule-file-input" class="file-input" accept=".pdf,.docx,.doc,.txt,.md,.rtf,.odt" multiple onchange="handleRuleUpload(event)">
+
+          <button class="btn btn-primary" onclick="triggerReindex()">
+            <i class="fa-solid fa-arrows-rotate"></i> Re-index Database Vektor
+          </button>
+        </div>
+      </div>
+
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Format</th>
+            <th>Nama File Dokumen</th>
+            <th>Ukuran File</th>
+            <th>Status Indexing</th>
+          </tr>
+        </thead>
+        <tbody id="guidelines-table-body"></tbody>
+      </table>
+    </section>
+
+    <!-- TAB 3: RIWAYAT LAPORAN -->
+    <section id="tab-history" class="tab-panel">
+      <div style="margin-bottom: 1.5rem;">
+        <h2>Riwayat Laporan Pemeriksaan</h2>
+        <p style="color: var(--text-muted); font-size: 0.9rem;">Daftar laporan JSON hasil pengujian kepatuhan yang tersimpan.</p>
+      </div>
+
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Nama File Laporan</th>
+            <th>Ukuran</th>
+            <th>Tanggal Dibuat</th>
+            <th>Aksi</th>
+          </tr>
+        </thead>
+        <tbody id="reports-table-body"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- Sliding Drawer: Chatbot Asisten Dokumen AI -->
+  <div class="assistant-drawer" id="assistant-drawer">
+    <div class="drawer-header">
+      <div class="drawer-title">
+        <i class="fa-solid fa-robot" style="color: var(--primary-blue);"></i> Asisten Konsultasi Dokumen &amp; Hukum
+      </div>
+      <div class="drawer-actions">
+        <button class="drawer-action-btn" onclick="toggleDrawerWide()" id="btn-toggle-wide" title="Perlebar / Perkecil Panel Chat">
+          <i class="fa-solid fa-up-right-and-down-left-from-center"></i>
+        </button>
+        <button class="drawer-action-btn" onclick="clearChatHistory()" title="Bersihkan Riwayat Chat">
+          <i class="fa-solid fa-trash-can"></i>
+        </button>
+        <button class="drawer-close-btn" onclick="toggleAssistantDrawer()" title="Tutup">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+    </div>
+
+    <div class="drawer-messages" id="chat-messages">
+      <div class="chat-bubble ai">
+        <div class="chat-welcome-card">
+          <div class="welcome-header">
+            <i class="fa-solid fa-scale-balanced"></i>
+            <strong>Selamat datang di Asisten Legal Drafter &amp; Kebahasaan</strong>
+          </div>
+          <p>Saya siap membantu meninjau naskah, memformulasikan pasal hukum, menguji kepatuhan UU 12/2011 &amp; UU 13/2022, serta menyempurnakan kaidah PUEBI/EYD &amp; KBBI.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Prompts Chips -->
+    <div class="drawer-quick-prompts" id="drawer-quick-prompts">
+      <button class="prompt-chip" onclick="applyQuickPrompt('Tolong berikan analisis kepatuhan hukum dan sistematika menyeluruh untuk dokumen ini.')">
+        <i class="fa-solid fa-magnifying-glass-chart"></i> Analisis Dokumen
+      </button>
+      <button class="prompt-chip" onclick="applyQuickPrompt('Tolong periksa apakah ada kesalahan ejaan, tanda baca, dan kosa kata tidak baku menurut EYD V & KBBI?')">
+        <i class="fa-solid fa-spell-check"></i> Cek EYD &amp; KBBI
+      </button>
+      <button class="prompt-chip" onclick="applyQuickPrompt('Bagaimana kesesuaian dokumen ini dengan kaidah perancangan UU No. 12 Tahun 2011 dan UU No. 13 Tahun 2022?')">
+        <i class="fa-solid fa-landmark"></i> Uji UU 12/2011 &amp; 13/2022
+      </button>
+      <button class="prompt-chip" onclick="applyQuickPrompt('Formulasikan ulang pasal/kalimat ini agar lebih baku, lugas, dan tidak multitafsir.')">
+        <i class="fa-solid fa-pen-nib"></i> Formulasi Ulang Pasal
+      </button>
+    </div>
+
+    <div class="drawer-input-area">
+      <textarea id="chat-input" placeholder="Tulis pertanyaan Anda seputar dokumen ini... (Shift+Enter untuk baris baru)" rows="2" onkeydown="handleChatKey(event)"></textarea>
+      <button class="btn btn-primary btn-icon" id="btn-send-chat" onclick="sendChatMessage()" title="Kirim Pesan">
+        <i class="fa-solid fa-paper-plane"></i>
+      </button>
+    </div>
+  </div>
+
+  <footer>
+    <div class="footer-content">
+      AI Document Checker &copy; 2026 &bull; Powered by OpenRouter AI &bull; Track Changes &amp; Executive Audit Exporter &bull; PUEBI/EYD &amp; KBBI Compliance Engine
+    </div>
+  </footer>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

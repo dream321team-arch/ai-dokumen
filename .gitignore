@@ -1,0 +1,34 @@
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Vector database / Local storage
+.chroma_data/
+
+# Pytest / Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Input and Output files (preserve directory structure with .gitkeep)
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
