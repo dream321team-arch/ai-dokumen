@@ -23,6 +23,7 @@ from src.docx_exporter import export_clean_docx, export_track_changes_docx, expo
 from src.doc_assistant import DocumentAssistant
 from src.schemas import CheckReport
 from src.history_store import save_check_history, list_check_history, get_check_history_by_id
+from src.job_store import create_job, update_job_progress, complete_job, fail_job, get_job
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +59,9 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 # OpenRouter model yang digunakan
 active_runtime_model = settings.OPENROUTER_MODEL
 
-# In-memory job store untuk proses check async dengan progress live
-jobs: Dict[str, Dict[str, Any]] = {}
-jobs_lock = threading.Lock()
+# Status job proses check disimpan di Supabase (bukan dict in-memory) supaya
+# tahan restart server (mis. instance Render free-tier yang bisa restart
+# mendadak) - progress tidak hilang begitu saja pas frontend lagi polling.
 DEFAULT_SECONDS_PER_BLOCK = 8.0
 
 
@@ -215,33 +216,20 @@ async def start_check_job(
     max_workers = min(5, total_blocks) if total_blocks else 1
     initial_eta = (DEFAULT_SECONDS_PER_BLOCK * total_blocks / max_workers) if total_blocks else 0.0
 
-    with jobs_lock:
-        jobs[job_id] = {
-            "status": "running",
-            "completed_blocks": 0,
-            "total_blocks": total_blocks,
-            "eta_seconds": initial_eta,
-            "errors": [],
-            "report": None,
-            "error_message": None,
-            "started_at": time.time(),
-            "filename": file.filename,
-        }
+    create_job(job_id, total_blocks=total_blocks, filename=file.filename, eta_seconds=initial_eta)
+
+    started_at = time.time()
 
     def _on_progress(info: Dict[str, Any]):
-        with jobs_lock:
-            job = jobs.get(job_id)
-            if not job:
-                return
-            job["completed_blocks"] = info["completed"]
-            elapsed = time.time() - job["started_at"]
-            completed = info["completed"]
-            total = info["total"]
-            if completed > 0:
-                avg_per_block = elapsed / completed
-                job["eta_seconds"] = max(0.0, avg_per_block * (total - completed))
-            if info.get("error"):
-                job["errors"].append({"block_id": info["block_id"], "message": info["error"]})
+        completed = info["completed"]
+        total = info["total"]
+        elapsed = time.time() - started_at
+        eta = max(0.0, (elapsed / completed) * (total - completed)) if completed > 0 else initial_eta
+        error = {"block_id": info["block_id"], "message": info["error"]} if info.get("error") else None
+        try:
+            update_job_progress(job_id, completed_blocks=completed, eta_seconds=eta, error=error)
+        except Exception as e:
+            logger.warning(f"Gagal update progress job {job_id} ke Supabase: {e}")
 
     def _run_job():
         try:
@@ -254,20 +242,13 @@ async def start_check_job(
             # Simpan ke riwayat Supabase - setiap run dapat baris sendiri, tidak
             # menimpa hasil sebelumnya walau nama dokumennya sama.
             save_check_history(report)
-
-            with jobs_lock:
-                job = jobs.get(job_id)
-                if job:
-                    job["status"] = "done"
-                    job["eta_seconds"] = 0.0
-                    job["report"] = report.model_dump()
+            complete_job(job_id, report.model_dump(mode="json"))
         except Exception as e:
             logger.error(f"Job {job_id} failed: {e}")
-            with jobs_lock:
-                job = jobs.get(job_id)
-                if job:
-                    job["status"] = "error"
-                    job["error_message"] = str(e)
+            try:
+                fail_job(job_id, str(e))
+            except Exception as fe:
+                logger.error(f"Gagal menandai job {job_id} sebagai error di Supabase: {fe}")
 
     threading.Thread(target=_run_job, daemon=True).start()
 
@@ -276,11 +257,10 @@ async def start_check_job(
 
 @app.get("/api/check/status/{job_id}")
 async def get_check_job_status(job_id: str):
-    with jobs_lock:
-        job = jobs.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="Job tidak ditemukan.")
-        return dict(job)
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job tidak ditemukan.")
+    return job
 
 
 class ExportDocxRequest(BaseModel):
