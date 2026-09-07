@@ -1,182 +1,165 @@
 import logging
-from typing import List, Optional, Dict, Any
-import chromadb
+from typing import List, Optional
+import psycopg2
+from psycopg2.extras import execute_values
+from pgvector.psycopg2 import register_vector
+from chromadb.utils import embedding_functions
 from src.schemas import Chunk
 from src.config import settings
 from src.nvidia_client import NvidiaClient
 
 logger = logging.getLogger(__name__)
 
+# Model embedding lokal (sama persis yang dulu dipakai ChromaDB secara otomatis:
+# all-MiniLM-L6-v2, gratis & offline, 384 dimensi) - dipakai ulang di sini murni
+# buat menghasilkan vector, tanpa perlu chromadb sebagai database vector lagi.
+_embedding_fn = embedding_functions.DefaultEmbeddingFunction()
+
 
 class VectorStore:
-    """Wrapper for local persistent ChromaDB collection storing guideline chunks."""
+    """
+    Wrapper penyimpanan & pencarian pedoman berbasis Supabase (Postgres + pgvector),
+    menggantikan ChromaDB lokal. Embedding tetap dihitung lokal & gratis (model
+    bawaan ChromaDB), cuma penyimpanan/pencariannya yang pindah ke Postgres supaya
+    persisten walau aplikasi di-deploy ke platform tanpa disk permanen.
+    """
 
-    def __init__(self, persist_dir: Optional[str] = None):
-        self.persist_dir = persist_dir or settings.CHROMA_PERSIST_DIR
-        self.client = chromadb.PersistentClient(path=self.persist_dir)
-        self.collection = self.client.get_or_create_collection(
-            name="pedoman",
-            metadata={"hnsw:space": "cosine"},
-        )
+    def __init__(self, db_url: Optional[str] = None):
+        self.db_url = db_url or settings.SUPABASE_DB_URL
+        if not self.db_url:
+            raise ValueError(
+                "SUPABASE_DB_URL belum diisi di .env - tidak bisa terhubung ke database pedoman."
+            )
+        self.conn = psycopg2.connect(self.db_url)
+        self.conn.autocommit = True
+        register_vector(self.conn)
         self.nvidia_client = NvidiaClient()
 
-    def index_chunks(self, chunks: List[Chunk], batch_size: int = 50) -> None:
+    def _embed(self, texts: List[str]) -> List[List[float]]:
+        return _embedding_fn(texts)
+
+    def index_chunks(self, chunks: List[Chunk], batch_size: int = 100) -> None:
         """
-        Embeds and stores chunks in ChromaDB in batches.
+        Menyimpan chunks ke tabel `pedoman_chunks` di Supabase, dengan embedding
+        dihitung lokal (gratis, tanpa API eksternal).
 
         Args:
             chunks: List of Chunk objects
-            batch_size: Number of chunks per API request batch
+            batch_size: Number of chunks per batch
         """
         if not chunks:
             logger.warning("No chunks provided to index.")
             return
 
-        logger.info(f"Indexing {len(chunks)} chunks into ChromaDB collection 'pedoman'...")
+        logger.info(f"Indexing {len(chunks)} chunks into Supabase (local embeddings)...")
 
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i : i + batch_size]
-            texts = [c.text for c in batch]
-            ids = [c.chunk_id for c in batch]
-            metadatas = [
-                {
-                    "document_name": c.document_name,
-                    "page_number": c.page_number,
-                    "section_title": c.section_title or "",
-                }
-                for c in batch
-            ]
+        with self.conn.cursor() as cur:
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i: i + batch_size]
+                texts = [c.text for c in batch]
+                embeddings = self._embed(texts)
 
-            embeddings = None
-            try:
-                # Generate embeddings via NVIDIA API if key available
-                if settings.NVIDIA_API_KEY:
-                    embeddings = self.nvidia_client.embed_texts(texts, input_type="passage")
-            except Exception as e:
-                logger.warning(f"Gagal menghasilkan embedding via API ({e}), menggunakan fallback indexing.")
+                rows = [
+                    (
+                        c.chunk_id,
+                        c.document_name,
+                        c.page_number,
+                        c.section_title,
+                        c.text,
+                        embeddings[idx],
+                    )
+                    for idx, c in enumerate(batch)
+                ]
 
-            # Store in ChromaDB (ChromaDB can store documents directly even without custom embeddings)
-            if embeddings:
-                self.collection.upsert(
-                    ids=ids,
-                    embeddings=embeddings,
-                    documents=texts,
-                    metadatas=metadatas,
-                )
-            else:
-                self.collection.upsert(
-                    ids=ids,
-                    documents=texts,
-                    metadatas=metadatas,
+                execute_values(
+                    cur,
+                    """
+                    insert into pedoman_chunks (id, document_name, page_number, section_title, content, embedding)
+                    values %s
+                    on conflict (id) do update set
+                        document_name = excluded.document_name,
+                        page_number = excluded.page_number,
+                        section_title = excluded.section_title,
+                        content = excluded.content,
+                        embedding = excluded.embedding
+                    """,
+                    rows,
                 )
 
-            logger.info(
-                f"Indexed batch {i // batch_size + 1}/{(len(chunks) - 1) // batch_size + 1} ({len(batch)} chunks)"
-            )
+                logger.info(
+                    f"Indexed batch {i // batch_size + 1}/{(len(chunks) - 1) // batch_size + 1} "
+                    f"({len(batch)} chunks) [local embedding]"
+                )
 
-        logger.info("Indexing completed successfully.")
+        logger.info("Indexing completed successfully (Supabase mode).")
 
-    def query(self, text: str, top_k: Optional[int] = None) -> List[Chunk]:
+    def query(
+        self,
+        text: str,
+        top_k: Optional[int] = None,
+        document_names: Optional[List[str]] = None,
+    ) -> List[Chunk]:
         """
-        Queries ChromaDB using NVIDIA embedding vector or exact/keyword text fallback.
+        Mencari chunks terkait lewat pencarian kemiripan vector (pgvector) di Supabase.
 
         Args:
             text: Query text string
             top_k: Number of nearest neighbors to retrieve
+            document_names: Optional list of document_name values to restrict the
+                search to (e.g. only search selected reference guideline files).
 
         Returns:
-            List of matching Chunk objects with metadata.
+            List of matching Chunk objects.
         """
         k = top_k or settings.RETRIEVAL_TOP_K
-
-        count = self.collection.count()
-        if count == 0:
-            logger.warning("ChromaDB collection 'pedoman' is empty.")
-            return []
-
-        n_results = min(k, count)
         matched_chunks: List[Chunk] = []
 
-        # 1. First attempt: Vector search via NVIDIA embeddings
-        if settings.NVIDIA_API_KEY:
-            try:
-                query_embeddings = self.nvidia_client.embed_texts([text], input_type="query")
-                res = self.collection.query(
-                    query_embeddings=query_embeddings,
-                    n_results=n_results,
-                    include=["documents", "metadatas"],
-                )
-                if res and res.get("documents") and res["documents"][0]:
-                    docs = res["documents"][0]
-                    ids = res["ids"][0]
-                    metas = res["metadatas"][0]
-
-                    for chunk_id, doc_text, meta in zip(ids, docs, metas):
-                        sec = meta.get("section_title")
-                        matched_chunks.append(
-                            Chunk(
-                                chunk_id=chunk_id,
-                                text=doc_text,
-                                document_name=str(meta.get("document_name", "")),
-                                page_number=int(meta.get("page_number", 1)),
-                                section_title=sec if sec else None,
-                            )
-                        )
-                    return matched_chunks
-            except Exception as e:
-                logger.warning(f"Vector search embedding failed ({e}), falling back to text matching.")
-
-        # 2. Second attempt / Fallback: Chroma document query (fuzzy/exact keyword match)
         try:
-            # Query top results directly by document text matching
-            res = self.collection.query(
-                query_texts=[text[:1000]], # Chroma internal query
-                n_results=n_results,
-                include=["documents", "metadatas"],
-            )
-            if res and res.get("documents") and res["documents"][0]:
-                docs = res["documents"][0]
-                ids = res["ids"][0]
-                metas = res["metadatas"][0]
-
-                for chunk_id, doc_text, meta in zip(ids, docs, metas):
-                    sec = meta.get("section_title")
+            query_embedding = self._embed([text])[0]
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "select id, document_name, page_number, section_title, content "
+                    "from match_pedoman_chunks(%s, %s, %s)",
+                    (query_embedding, k, document_names),
+                )
+                rows = cur.fetchall()
+                for chunk_id, doc_name, page_number, section_title, content in rows:
                     matched_chunks.append(
                         Chunk(
                             chunk_id=chunk_id,
-                            text=doc_text,
-                            document_name=str(meta.get("document_name", "")),
-                            page_number=int(meta.get("page_number", 1)),
-                            section_title=sec if sec else None,
-                        )
-                    )
-                return matched_chunks
-        except Exception as e:
-            logger.warning(f"Text query search failed ({e}). Getting top sample chunks.")
-
-        # 3. Last fallback: Retrieve nearest available chunks from collection
-        try:
-            sample = self.collection.get(limit=n_results, include=["documents", "metadatas"])
-            if sample and sample.get("documents"):
-                for cid, cdoc, cmeta in zip(sample["ids"], sample["documents"], sample["metadatas"]):
-                    matched_chunks.append(
-                        Chunk(
-                            chunk_id=cid,
-                            text=cdoc,
-                            document_name=str(cmeta.get("document_name", "")),
-                            page_number=int(cmeta.get("page_number", 1)),
-                            section_title=cmeta.get("section_title") or None,
+                            text=content,
+                            document_name=doc_name,
+                            page_number=page_number,
+                            section_title=section_title,
                         )
                     )
         except Exception as e:
-            logger.error(f"Failed all collection retrieval attempts: {e}")
+            logger.warning(f"Supabase pencarian pedoman gagal: {e}")
 
         return matched_chunks
 
+    def count(self) -> int:
+        """Returns the total number of indexed pedoman chunks."""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("select count(*) from pedoman_chunks;")
+                return cur.fetchone()[0]
+        except Exception as e:
+            logger.warning(f"Failed to count pedoman chunks: {e}")
+            return 0
+
+    def list_document_names(self) -> List[str]:
+        """Returns the distinct document_name values present in the indexed pedoman."""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("select distinct document_name from pedoman_chunks order by document_name;")
+                return [row[0] for row in cur.fetchall()]
+        except Exception as e:
+            logger.warning(f"Failed to list document names: {e}")
+            return []
+
     def clear(self) -> None:
-        """Clears all documents in the collection."""
-        self.client.delete_collection("pedoman")
-        self.collection = self.client.get_or_create_collection(
-            name="pedoman", metadata={"hnsw:space": "cosine"}
-        )
-        logger.info("Cleared ChromaDB 'pedoman' collection.")
+        """Clears all indexed pedoman chunks."""
+        with self.conn.cursor() as cur:
+            cur.execute("delete from pedoman_chunks;")
+        logger.info("Cleared all rows in Supabase 'pedoman_chunks' table.")

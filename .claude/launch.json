@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ai-doc-checker",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["run.py", "serve"],
+      "autoPort": true
+    }
+  ]
+}

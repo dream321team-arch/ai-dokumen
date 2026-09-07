@@ -9,26 +9,57 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _compute_retry_delay(exc: Exception, attempt: int) -> float:
+    """
+    Computes how long to wait before retrying after an error. For HTTP 429
+    (rate limit) responses, prefers the provider's own X-RateLimit-Reset
+    header when available, otherwise backs off exponentially; other errors
+    just get a short fixed delay.
+    """
+    status_code = getattr(exc, "status_code", None)
+    if status_code == 429:
+        try:
+            headers = getattr(getattr(exc, "response", None), "headers", {}) or {}
+            reset_ms = headers.get("X-RateLimit-Reset")
+            if reset_ms:
+                wait = (int(reset_ms) / 1000.0) - time.time()
+                if 0 < wait <= 60:
+                    return wait + 0.5
+        except Exception:
+            pass
+        return min(2 ** (attempt + 1), 15)
+    return 1.0
+
+
 SYSTEM_PROMPT = """Anda adalah AI Document Checker & Legal Compliance Reviewer profesional untuk dokumen hukum, perundang-undangan, dan pedoman resmi Bahasa Indonesia.
 
-Tugas Anda adalah memeriksa suatu blok teks dari "Dokumen Upload" berdasarkan "Potongan Dokumen Pedoman" (rujukan) serta kaidah Bahasa Indonesia (PUEBI/EYD V & KBBI).
+Tugas Anda adalah memeriksa suatu blok teks dari "Dokumen Upload" berdasarkan "Potongan Dokumen Pedoman" (rujukan) dan "Definisi Resmi (Ketentuan Umum Pedoman)" jika dilampirkan.
+
+═══════════════════════════════════════════
+PATOKAN UTAMA — DOKUMEN PEDOMAN & KETENTUAN UMUM (BUKAN KBBI):
+═══════════════════════════════════════════
+- Basis penilaian BENAR/SALAH (status sesuai/perlu_revisi) adalah SEMATA-MATA kepatuhan terhadap "Potongan Dokumen Pedoman" dan konsistensi istilah terhadap "Definisi Resmi (Ketentuan Umum Pedoman)" yang dilampirkan.
+- KBBI/PUEBI/ejaan/tanda baca/kosa kata baku BUKAN patokan utama. Isu semacam itu HANYA boleh menghasilkan status "ejaan_tanda_baca" (kategori terpisah, TIDAK PERNAH membuat status jadi "perlu_revisi" jika tidak ada pelanggaran pedoman/definisi).
+- Jika ada "Definisi Resmi (Ketentuan Umum Pedoman)" yang dilampirkan dan istilah tersebut dipakai di blok dengan makna yang BERBEDA/BERTENTANGAN dari definisi resmi itu, ini WAJIB dianggap pelanggaran pedoman (error_type "pedoman", status "perlu_revisi"), sertakan rule_reference ke dokumen+halaman ketentuan umum tersebut.
 
 ═══════════════════════════════════════════
 ATURAN UTAMA PENETAPAN STATUS:
 ═══════════════════════════════════════════
 1. "sesuai" :
-   - Gunakan status ini jika teks dokumen upload MEMATUHI, IDENTIK, ATAU COCOK dengan Potongan Dokumen Pedoman yang ada.
+   - Gunakan status ini jika teks dokumen upload MEMATUHI, IDENTIK, ATAU COCOK dengan Potongan Dokumen Pedoman yang ada, dan konsisten dengan Definisi Resmi Ketentuan Umum (jika ada).
    - Gunakan status ini juga jika teks merupakan isi naskah yang benar dan tidak memiliki kesalahan substansi/aturan.
    - Tetap cantumkan 'rule_reference' jika ada rujukan pedoman yang relevan yang mendasarinya!
    - 'issue' diisi null (atau string singkat bahwa teks sesuai), 'suggested_revision' diisi null, 'span_errors' diisi [].
 
 2. "perlu_revisi" :
-   - Gunakan status ini jika teks dokumen upload MELANGGAR, BERTENTANGAN, SALAH URUTAN, ATAU MENGUBAH SUBSTANSI aturan dalam Potongan Dokumen Pedoman.
+   - Gunakan status ini HANYA jika teks dokumen upload MELANGGAR, BERTENTANGAN, SALAH URUTAN, ATAU MENGUBAH SUBSTANSI aturan dalam Potongan Dokumen Pedoman, ATAU memakai istilah bertentangan dengan Definisi Resmi Ketentuan Umum.
    - WAJIB menyertakan 'rule_reference' (document, page, section).
    - Jelaskan masalah di 'issue', berikan revisi utuh di 'suggested_revision', dan rincikan kata yang salah di 'span_errors'.
+   - JANGAN gunakan status ini hanya karena alasan ejaan/tanda baca/KBBI semata — untuk itu gunakan status "ejaan_tanda_baca".
 
 3. "ejaan_tanda_baca" :
-   - Gunakan status ini jika substansi aturan TIDAK melanggar pedoman, tetapi ada kesalahan teknis penulisan:
+   - Gunakan status ini jika substansi aturan TIDAK melanggar pedoman/definisi, tetapi ada kesalahan teknis penulisan (kategori SEKUNDER, tidak memengaruhi kepatuhan):
      * Tanda baca salah/kurang/berlebih (titik, koma, spasi ganda, spasi sebelum tanda baca, tanda petik, tanda hubung).
      * Ejaan salah / typo / kapitalisasi tidak tepat.
      * Kosa kata tidak baku menurut KBBI (misal: "aktifitas" -> "aktivitas", "merubah" -> "mengubah", "resiko" -> "risiko", "sistim" -> "sistem", "praktek" -> "praktik", "ijin" -> "izin", "propinsi" -> "provinsi", "analisa" -> "analisis").
@@ -86,6 +117,23 @@ class OpenRouterReviewer:
         # Model biarkan None untuk auto-routing OpenRouter
         self.model = model or settings.OPENROUTER_MODEL or None
         self.client = None
+
+        self.fallback_client = None
+        self.fallback_model = settings.OPENROUTER_FALLBACK_MODEL or None
+        if settings.OPENROUTER_FALLBACK_API_KEY and settings.OPENROUTER_FALLBACK_API_KEY.strip():
+            try:
+                self.fallback_client = OpenAI(
+                    base_url=settings.OPENROUTER_FALLBACK_BASE_URL,
+                    api_key=settings.OPENROUTER_FALLBACK_API_KEY.strip(),
+                    default_headers={
+                        "HTTP-Referer": "http://localhost:8000",
+                        "X-Title": "AI Document Checker",
+                    },
+                    timeout=20.0,
+                )
+                logger.info("OpenRouter fallback client initialized in Reviewer")
+            except Exception as fe:
+                logger.warning(f"Failed to init OpenRouter fallback client: {fe}")
 
         self.groq_client = None
         if settings.GROQ_API_KEY and settings.GROQ_API_KEY.strip():
@@ -174,12 +222,48 @@ class OpenRouterReviewer:
 
         return validated
 
+    @staticmethod
+    def _sanitize_rule_reference(parsed_json: dict) -> None:
+        """
+        Some models return rule_reference as {"document": null, "page": null, ...}
+        instead of omitting it / returning null outright when there is genuinely no
+        reference (e.g. status "tidak_ditemukan_rujukan"). RuleReference requires
+        document/page when present, so normalize an empty-looking dict to None to
+        avoid a Pydantic validation error.
+        """
+        ref = parsed_json.get("rule_reference")
+        if isinstance(ref, dict) and (not ref.get("document") or ref.get("page") is None):
+            parsed_json["rule_reference"] = None
+
     def review_block(
-        self, block: Block, retrieved_chunks: List[Chunk], max_retries: int = 1
+        self,
+        block: Block,
+        retrieved_chunks: List[Chunk],
+        max_retries: int = 1,
+        glossary_terms: Optional[List[dict]] = None,
     ) -> BlockReviewResult:
         """
         Reviews a document block against retrieved reference chunks.
+
+        Args:
+            glossary_terms: Optional list of official term definitions extracted from
+                the reference documents' "Ketentuan Umum" section that are relevant
+                to this block, e.g. [{"term", "definition", "document_name", "page"}].
         """
+        # Format official Ketentuan Umum definitions relevant to this block
+        glossary_str = ""
+        if glossary_terms:
+            formatted_defs = [
+                f"- \"{d['term']}\" adalah {d['definition']} "
+                f"(Rujukan: {d['document_name']}, hal. {d['page']})"
+                for d in glossary_terms
+            ]
+            glossary_str = (
+                "\n=== DEFINISI RESMI (KETENTUAN UMUM PEDOMAN) ===\n"
+                + "\n".join(formatted_defs)
+                + "\n"
+            )
+
         # Format reference chunks into prompt
         formatted_chunks = []
         for idx, chunk in enumerate(retrieved_chunks, start=1):
@@ -202,12 +286,13 @@ class OpenRouterReviewer:
             f"=== TEKS BLOK DOKUMEN UPLOAD ===\n"
             f"{block.text}\n\n"
             f"=== POTONGAN DOKUMEN PEDOMAN (RUJUKAN) ===\n"
-            f"{references_str}\n\n"
+            f"{references_str}\n"
+            f"{glossary_str}\n"
             f"INSTRUKSI:\n"
-            f"1. Periksa apakah teks upload ini COCOK atau IDENTIK dengan salah satu potongan pedoman di atas.\n"
-            f"   Jika COCOK/SESUAI dan tidak ada typo/tanda baca salah, kembalikan status 'sesuai' dan sertakan rule_reference ke dokumen rujukan tersebut.\n"
-            f"2. Jika melanggar pedoman, kembalikan status 'perlu_revisi' + rule_reference + span_errors.\n"
-            f"3. Jika ada typo / tanda baca / kosa kata salah tapi tidak melanggar aturan, kembalikan 'ejaan_tanda_baca' + span_errors.\n"
+            f"1. Periksa apakah teks upload ini COCOK atau IDENTIK dengan salah satu potongan pedoman di atas, dan konsisten dengan Definisi Resmi Ketentuan Umum (jika ada).\n"
+            f"   Jika COCOK/SESUAI dan tidak ada penyimpangan definisi, kembalikan status 'sesuai' dan sertakan rule_reference ke dokumen rujukan tersebut.\n"
+            f"2. Jika melanggar pedoman ATAU memakai istilah bertentangan dengan Definisi Resmi Ketentuan Umum, kembalikan status 'perlu_revisi' + rule_reference + span_errors (error_type 'pedoman').\n"
+            f"3. Jika HANYA ada typo / tanda baca / kosa kata KBBI yang salah (bukan pelanggaran pedoman/definisi), kembalikan 'ejaan_tanda_baca' + span_errors. JANGAN jadikan ini 'perlu_revisi'.\n"
             f"4. PENTING: Kembalikan HANYA JSON objek yang valid tanpa teks tambahan apapun. Jangan tambahkan penjelasan atau komentar di luar JSON.\n\n"
             f"Format JSON yang harus Anda kembalikan:\n"
             f'{{"status": "sesuai", "issue": null, "rule_reference": {{"document": "...", "page": 1, "section": "..."}}, "suggested_revision": null, "span_errors": []}}'
@@ -245,7 +330,7 @@ class OpenRouterReviewer:
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.1,
-                    max_tokens=2048,
+                    max_tokens=4096,
                 )
 
                 content = completion.choices[0].message.content or ""
@@ -278,6 +363,7 @@ class OpenRouterReviewer:
                 if status not in ["sesuai", "perlu_revisi", "ejaan_tanda_baca", "tidak_ditemukan_rujukan"]:
                     status = "sesuai" if retrieved_chunks else "tidak_ditemukan_rujukan"
                 parsed_json["status"] = status
+                self._sanitize_rule_reference(parsed_json)
 
                 result = BlockReviewResult(**parsed_json)
 
@@ -299,14 +385,65 @@ class OpenRouterReviewer:
 
             except Exception as e:
                 last_exception = e
+                delay = _compute_retry_delay(e, attempt)
                 logger.warning(
-                    f"Error reviewing block {block.block_id} (attempt {attempt + 1}/{max_retries + 1}): {e}"
+                    f"Error reviewing block {block.block_id} (attempt {attempt + 1}/{max_retries + 1}): "
+                    f"{e} — retrying in {delay:.1f}s"
                 )
-                time.sleep(1)
+                if attempt < max_retries:
+                    time.sleep(delay)
 
         logger.error(
-            f"Failed to review block {block.block_id} after OpenRouter retries: {last_exception}"
+            f"Failed to review block {block.block_id} after OpenRouter (9router) retries: {last_exception}"
         )
+
+        # OpenRouter Fallback Execution (openrouter.ai resmi) if 9router exhausted/failed
+        if self.fallback_client:
+            try:
+                logger.info(f"Attempting OpenRouter fallback for block {block.block_id}...")
+                fb_comp = self.fallback_client.chat.completions.create(
+                    model=self.fallback_model,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.1,
+                    max_tokens=4096,
+                )
+                fb_content = fb_comp.choices[0].message.content or ""
+                cleaned_fb = re.sub(r"^```json\s*", "", fb_content.strip(), flags=re.IGNORECASE)
+                cleaned_fb = re.sub(r"\s*```$", "", cleaned_fb)
+                json_match = re.search(r"\{[\s\S]*\}", cleaned_fb)
+                if json_match:
+                    cleaned_fb = json_match.group(0)
+                parsed_json = json.loads(cleaned_fb)
+                parsed_json["block_id"] = block.block_id
+                parsed_json["original_text"] = block.text
+                raw_span_errors = parsed_json.get("span_errors", [])
+                parsed_json["span_errors"] = (
+                    self._validate_and_fix_span_errors(raw_span_errors, block.text)
+                    if isinstance(raw_span_errors, list)
+                    else []
+                )
+                status = parsed_json.get("status", "sesuai")
+                if status not in ["sesuai", "perlu_revisi", "ejaan_tanda_baca", "tidak_ditemukan_rujukan"]:
+                    status = "sesuai" if retrieved_chunks else "tidak_ditemukan_rujukan"
+                parsed_json["status"] = status
+                result = BlockReviewResult(**parsed_json)
+                if (result.status in ["sesuai", "perlu_revisi"]) and not result.rule_reference and retrieved_chunks:
+                    top_c = retrieved_chunks[0]
+                    result.rule_reference = RuleReference(
+                        document=top_c.document_name,
+                        page=top_c.page_number,
+                        section=top_c.section_title,
+                    )
+                if result.status == "sesuai" and len(result.span_errors) > 0:
+                    has_pedoman = any(e.error_type == "pedoman" for e in result.span_errors)
+                    result.status = "perlu_revisi" if has_pedoman else "ejaan_tanda_baca"
+                logger.info(f"OpenRouter fallback successfully reviewed block {block.block_id}")
+                return result
+            except Exception as fe:
+                logger.error(f"OpenRouter fallback also failed for block {block.block_id}: {fe}")
 
         # Groq Fallback Execution if OpenRouter exhausted/failed
         if self.groq_client:
@@ -319,7 +456,7 @@ class OpenRouterReviewer:
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.1,
-                    max_tokens=2048,
+                    max_tokens=4096,
                 )
                 groq_content = groq_comp.choices[0].message.content or ""
                 cleaned_groq = re.sub(r"^```json\s*", "", groq_content.strip(), flags=re.IGNORECASE)

@@ -159,6 +159,18 @@
         </div>
       </div>
 
+      <!-- Pilih Dokumen Referensi (opsional, default: semua pedoman) -->
+      <div class="ref-selection-panel" id="ref-selection-panel">
+        <div class="ref-selection-header" onclick="toggleRefSelectionPanel()">
+          <span><i class="fa-solid fa-book"></i> Dokumen Referensi yang Dipakai <span id="ref-selection-count" class="badge-count">Semua</span></span>
+          <i class="fa-solid fa-chevron-down" id="ref-selection-chevron"></i>
+        </div>
+        <div class="ref-selection-body" id="ref-selection-body" style="display: none;">
+          <p class="ref-selection-hint">Pilih pedoman yang jadi acuan pemeriksaan untuk dokumen ini. Kosongkan semua centang untuk memakai seluruh pedoman.</p>
+          <div id="ref-selection-list" class="ref-selection-list"></div>
+        </div>
+      </div>
+
       <!-- Drag & Drop File Upload -->
       <div class="upload-card" id="drop-zone" onclick="document.getElementById('doc-file-input').click()">
         <input type="file" id="doc-file-input" class="file-input" accept=".pdf,.docx,.doc,.txt,.md,.rtf,.odt" onchange="handleFileSelect(event)">
@@ -182,6 +194,16 @@
         <p id="loading-desc" style="color: var(--text-muted); font-size: 0.875rem; margin-top: 0.5rem;">
           Mengekstrak teks, analisis kepatuhan pedoman, validasi struktur UU, serta ejaan & tanda baca...
         </p>
+
+        <div class="progress-bar-track" id="progress-bar-track">
+          <div class="progress-bar-fill" id="progress-bar-fill" style="width: 0%;"></div>
+        </div>
+        <div class="progress-meta-row">
+          <span id="progress-blocks-text">0 / 0 blok</span>
+          <span id="progress-eta-text">Menghitung estimasi waktu...</span>
+        </div>
+
+        <div class="progress-errors-log" id="progress-errors-log" style="display: none;"></div>
       </div>
 
       <!-- Filter Controls & Turnitin Split View Results -->
@@ -287,15 +309,16 @@
     <section id="tab-history" class="tab-panel">
       <div style="margin-bottom: 1.5rem;">
         <h2>Riwayat Laporan Pemeriksaan</h2>
-        <p style="color: var(--text-muted); font-size: 0.9rem;">Daftar laporan JSON hasil pengujian kepatuhan yang tersimpan.</p>
+        <p style="color: var(--text-muted); font-size: 0.9rem;">Semua hasil pemeriksaan tersimpan di sini, termasuk kalau dokumen yang sama dicek berkali-kali (revisi demi revisi).</p>
       </div>
 
       <table class="data-table">
         <thead>
           <tr>
-            <th>Nama File Laporan</th>
-            <th>Ukuran</th>
-            <th>Tanggal Dibuat</th>
+            <th>Dokumen</th>
+            <th>Skor</th>
+            <th>Grade</th>
+            <th>Waktu Cek</th>
             <th>Aksi</th>
           </tr>
         </thead>

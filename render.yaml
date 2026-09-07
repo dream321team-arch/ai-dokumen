@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: ai-document-checker
+    runtime: python
+    plan: starter
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run.py serve
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+
+      # --- Wajib diisi manual di Render Dashboard (Environment tab) setelah ---
+      # --- service dibuat - nilainya rahasia, jadi tidak disimpan di repo.  ---
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        sync: false
+      - key: OPENROUTER_FALLBACK_API_KEY
+        sync: false
+      - key: OPENROUTER_FALLBACK_BASE_URL
+        sync: false
+      - key: OPENROUTER_FALLBACK_MODEL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        sync: false

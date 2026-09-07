@@ -1,5 +1,4 @@
 import re
-import uuid
 import logging
 from typing import List, Dict, Any, Optional
 from src.schemas import Chunk, Block
@@ -7,14 +6,36 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Heuristic patterns for section headers in Indonesian reference documents
+# Heuristic patterns for section headers in Indonesian reference documents.
+# Tolerates an optional leading "**"/"*" markdown emphasis marker, since
+# headings that were bold/italic in the source document now carry those
+# markers (see document_extractor._format_span_text).
 HEADING_REGEX = re.compile(
-    r"^(BAB\s+[IVXLCDM\d]+|PASAL\s+\d+|BAGIAN\s+[A-Z0-9]+|LAMPIRAN\s+[A-Z0-9]+|[A-Z0-9]\.\s+[A-Z0-9])",
+    r"^\**\s*(BAB\s+[IVXLCDM\d]+|PASAL\s+\d+|BAGIAN\s+[A-Z0-9]+|LAMPIRAN\s+[A-Z0-9]+|[A-Z0-9]\.\s+[A-Z0-9])",
     re.IGNORECASE,
 )
 
 # Sentence-ending punctuation pattern for Indonesian text
 SENTENCE_END_RE = re.compile(r'[.!?;]\s+')
+
+# Matches the start of a "Ketentuan Umum" (General Provisions) section
+KETENTUAN_UMUM_RE = re.compile(r"KETENTUAN\s+UMUM", re.IGNORECASE)
+
+# Matches the next BAB heading (used as the end boundary of Ketentuan Umum)
+BAB_HEADING_RE = re.compile(r"^\**\s*BAB\s+[IVXLCDM]+\b", re.IGNORECASE | re.MULTILINE)
+
+# Matches the start of a numbered list item, e.g. "12. " — used to split the
+# Ketentuan Umum section into candidate entries. Deliberately loose (doesn't
+# require a line start) since paragraph reflow can leave items space-separated
+# rather than each on its own line.
+NUMBERED_ITEM_RE = re.compile(r"\d{1,3}\.\s+")
+
+# Splits a candidate entry into term/definition around the word "adalah"
+ADALAH_SPLIT_RE = re.compile(r"\s+adalah\s+", re.IGNORECASE)
+
+# Matches a 4-digit year (1900-2099) anywhere in a reference document's filename,
+# e.g. "UU 12 Tahun 2011.pdf" -> 2011, "uu13-2022.pdf" -> 2022.
+YEAR_IN_FILENAME_RE = re.compile(r"\b(19|20)\d{2}\b")
 
 # Maximum block size in words - blocks larger than this will be split at sentence boundaries
 MAX_BLOCK_WORDS = 300
@@ -118,7 +139,11 @@ def chunk_pedoman(pages: List[Dict[str, Any]], document_name: str) -> List[Chunk
             chunk_str = page_text[start_idx:end_idx].strip()
 
             if chunk_str:
-                chunk_id = f"{document_name}_p{page_num}_{uuid.uuid4().hex[:6]}"
+                # Deterministic id (document + page + start offset) so re-indexing
+                # the same document overwrites its old chunks via upsert instead
+                # of duplicating them (a random id here previously caused the
+                # ChromaDB collection to double in size on every re-index).
+                chunk_id = f"{document_name}_p{page_num}_c{start_idx}"
                 chunks.append(
                     Chunk(
                         chunk_id=chunk_id,
@@ -143,6 +168,100 @@ def chunk_pedoman(pages: List[Dict[str, Any]], document_name: str) -> List[Chunk
 
     logger.info(f"Created {len(chunks)} chunks for document '{document_name}'.")
     return chunks
+
+
+def extract_ketentuan_umum_definitions(
+    pages: List[Dict[str, Any]], document_name: str
+) -> List[Dict[str, Any]]:
+    """
+    Best-effort extraction of official term definitions from a reference document's
+    "Ketentuan Umum" (General Provisions) section, typically found at the beginning
+    of Indonesian legal drafts (e.g. "1. Undang-Undang adalah ...").
+
+    Returns:
+        List of dicts: [{"term": str, "definition": str, "document_name": str, "page": int}]
+    """
+    definitions: List[Dict[str, Any]] = []
+
+    # Concatenate pages while tracking page boundaries so we can locate the
+    # page number of each definition entry later.
+    full_text = ""
+    page_offsets: List[tuple] = []  # (start_char_offset, page_number)
+    for page in pages:
+        page_offsets.append((len(full_text), page["page_number"]))
+        full_text += page["text"] + "\n"
+
+    match = KETENTUAN_UMUM_RE.search(full_text)
+    if not match:
+        return definitions
+
+    section_start = match.end()
+
+    # Find the next BAB heading after the Ketentuan Umum heading to bound the section
+    next_bab = BAB_HEADING_RE.search(full_text, pos=section_start)
+    section_end = next_bab.start() if next_bab else len(full_text)
+
+    section_text = full_text[section_start:section_end]
+
+    def _page_for_offset(rel_offset: int) -> int:
+        abs_offset = section_start + rel_offset
+        page_num = page_offsets[0][1] if page_offsets else 1
+        for start_off, p_num in page_offsets:
+            if start_off <= abs_offset:
+                page_num = p_num
+            else:
+                break
+        return page_num
+
+    # Split the section into candidate entries at each numbered-item marker
+    # ("1. ", "2. ", ...), then keep only the ones that actually contain
+    # "adalah" (a real definition) - stray numbers elsewhere in the text
+    # (e.g. "Pasal 21", a year) won't have that, so they're skipped.
+    markers = list(NUMBERED_ITEM_RE.finditer(section_text))
+    for idx, marker in enumerate(markers):
+        entry_start = marker.end()
+        entry_end = markers[idx + 1].start() if idx + 1 < len(markers) else len(section_text)
+        entry_text = section_text[entry_start:entry_end]
+
+        split = ADALAH_SPLIT_RE.search(entry_text)
+        if not split:
+            continue
+
+        term = re.sub(r"\s+", " ", entry_text[: split.start()]).strip(" .:;\"'")
+        definition = re.sub(r"\s+", " ", entry_text[split.end():]).strip(" .:;\"'")
+
+        if not term or not definition:
+            continue
+        # Skip unreasonably long "terms" (likely a mis-parsed run-on match)
+        if len(term.split()) > 12:
+            continue
+
+        definitions.append(
+            {
+                "term": term,
+                "definition": definition,
+                "document_name": document_name,
+                "page": _page_for_offset(entry_start),
+            }
+        )
+
+    logger.info(
+        f"Extracted {len(definitions)} Ketentuan Umum definition(s) from '{document_name}'."
+    )
+    return definitions
+
+
+def extract_year_from_filename(filename: str) -> Optional[int]:
+    """
+    Best-effort extraction of a reference document's year from its filename
+    (e.g. "UU 12 Tahun 2011.pdf" -> 2011), used to rank pedoman by recency so
+    newer regulations on a topic take precedence over older ones. Returns
+    None if no plausible year is found.
+    """
+    match = YEAR_IN_FILENAME_RE.search(filename)
+    if not match:
+        return None
+    return int(match.group(0))
 
 
 def _split_long_block_at_sentences(text: str, max_words: int = MAX_BLOCK_WORDS) -> List[str]:

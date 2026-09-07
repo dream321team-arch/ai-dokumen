@@ -123,9 +123,9 @@ class NvidiaReviewer:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
     ):
-        self.api_key = api_key or settings.NVIDIA_API_KEY
-        self.base_url = base_url or settings.NVIDIA_BASE_URL
-        self.model = model or settings.NVIDIA_LLM_MODEL
+        self.api_key = api_key if api_key is not None else settings.NVIDIA_API_KEY
+        self.base_url = base_url if base_url is not None else settings.NVIDIA_BASE_URL
+        self.model = model if model is not None else settings.NVIDIA_LLM_MODEL
         self.client = None
 
         if self.api_key and self.api_key.strip():
@@ -260,23 +260,41 @@ class NvidiaReviewer:
 
         for attempt in range(max_retries + 1):
             try:
-                completion = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.1,
-                    top_p=0.9,
-                    max_tokens=2048,
-                    response_format={"type": "json_object"},
-                )
+                try:
+                    completion = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0.2,
+                        top_p=0.95,
+                        max_tokens=4096,
+                        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                    )
+                except Exception as eb_err:
+                    logger.debug(f"Retrying without chat_template_kwargs: {eb_err}")
+                    completion = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0.2,
+                        top_p=0.95,
+                        max_tokens=4096,
+                    )
 
                 content = completion.choices[0].message.content or ""
 
                 # Strip potential markdown codefence blocks
-                cleaned_content = re.sub(r"^```json\s*", "", content.strip())
+                cleaned_content = re.sub(r"^```json\s*", "", content.strip(), flags=re.IGNORECASE)
                 cleaned_content = re.sub(r"\s*```$", "", cleaned_content)
+
+                # Extract JSON substring if extra text is present
+                json_match = re.search(r"\{[\s\S]*\}", cleaned_content)
+                if json_match:
+                    cleaned_content = json_match.group(0)
 
                 parsed_json = json.loads(cleaned_content)
 

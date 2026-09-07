@@ -1,6 +1,9 @@
 import os
 import shutil
 import json
+import time
+import uuid
+import threading
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -13,11 +16,13 @@ from pydantic import BaseModel
 
 from src.config import settings
 from src.pipeline import index_pedoman, check_document
-from src.document_extractor import SUPPORTED_EXTENSIONS
+from src.document_extractor import SUPPORTED_EXTENSIONS, extract_document_pages
+from src.chunker import split_into_blocks
 from src.vector_store import VectorStore
 from src.docx_exporter import export_clean_docx, export_track_changes_docx, export_audit_report_docx
 from src.doc_assistant import DocumentAssistant
 from src.schemas import CheckReport
+from src.history_store import save_check_history, list_check_history, get_check_history_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +58,11 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 # OpenRouter model yang digunakan
 active_runtime_model = settings.OPENROUTER_MODEL
 
+# In-memory job store untuk proses check async dengan progress live
+jobs: Dict[str, Dict[str, Any]] = {}
+jobs_lock = threading.Lock()
+DEFAULT_SECONDS_PER_BLOCK = 8.0
+
 
 def _is_supported_file(filename: str) -> bool:
     ext = Path(filename).suffix.lower()
@@ -72,7 +82,7 @@ async def get_status():
     """Returns system status and configuration."""
     try:
         store = VectorStore()
-        total_chunks = store.collection.count()
+        total_chunks = store.count()
     except Exception as e:
         logger.warning(f"Could not read vector store count: {e}")
         total_chunks = 0
@@ -151,11 +161,9 @@ async def check_uploaded_document(file: UploadFile = File(...)):
         # Gunakan active_runtime_model (auto)
         report = check_document(str(dest_path), model_override=active_runtime_model)
 
-        # Save output JSON
-        report_name = f"hasil_{dest_path.stem}.json"
-        report_path = output_dir / report_name
-        json_data = report.model_dump_json(indent=2)
-        report_path.write_text(json_data, encoding="utf-8")
+        # Simpan ke riwayat Supabase - setiap run dapat baris sendiri, tidak
+        # menimpa hasil sebelumnya walau nama dokumennya sama.
+        save_check_history(report)
 
         return report.model_dump()
 
@@ -164,6 +172,115 @@ async def check_uploaded_document(file: UploadFile = File(...)):
         raise HTTPException(
             status_code=500, detail=f"Gagal memproses pengujian dokumen: {str(e)}"
         )
+
+
+@app.post("/api/check/start")
+async def start_check_job(
+    file: UploadFile = File(...),
+    selected_refs: Optional[str] = Form(None),
+):
+    """
+    Starts a document check as a background job and immediately returns a job_id.
+    Progress (blocks completed, ETA, live errors) can be polled via
+    GET /api/check/status/{job_id}.
+    """
+    if not _is_supported_file(file.filename):
+        supported_str = ", ".join(SUPPORTED_EXTENSIONS)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Format file '{file.filename}' tidak didukung. Format yang didukung: {supported_str}",
+        )
+
+    dest_path = input_dir / file.filename
+    with open(dest_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    refs_list: Optional[List[str]] = None
+    if selected_refs:
+        try:
+            parsed = json.loads(selected_refs)
+            if isinstance(parsed, list) and parsed:
+                refs_list = [str(x) for x in parsed]
+        except Exception:
+            logger.warning(f"Gagal parse selected_refs: {selected_refs}")
+
+    # Quick pre-extraction (no LLM calls) just to count blocks for an immediate ETA
+    try:
+        pages = extract_document_pages(str(dest_path))
+        total_blocks = len(split_into_blocks(pages))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Gagal membaca dokumen: {e}")
+
+    job_id = uuid.uuid4().hex
+    max_workers = min(5, total_blocks) if total_blocks else 1
+    initial_eta = (DEFAULT_SECONDS_PER_BLOCK * total_blocks / max_workers) if total_blocks else 0.0
+
+    with jobs_lock:
+        jobs[job_id] = {
+            "status": "running",
+            "completed_blocks": 0,
+            "total_blocks": total_blocks,
+            "eta_seconds": initial_eta,
+            "errors": [],
+            "report": None,
+            "error_message": None,
+            "started_at": time.time(),
+            "filename": file.filename,
+        }
+
+    def _on_progress(info: Dict[str, Any]):
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if not job:
+                return
+            job["completed_blocks"] = info["completed"]
+            elapsed = time.time() - job["started_at"]
+            completed = info["completed"]
+            total = info["total"]
+            if completed > 0:
+                avg_per_block = elapsed / completed
+                job["eta_seconds"] = max(0.0, avg_per_block * (total - completed))
+            if info.get("error"):
+                job["errors"].append({"block_id": info["block_id"], "message": info["error"]})
+
+    def _run_job():
+        try:
+            report = check_document(
+                str(dest_path),
+                model_override=active_runtime_model,
+                selected_references=refs_list,
+                progress_callback=_on_progress,
+            )
+            # Simpan ke riwayat Supabase - setiap run dapat baris sendiri, tidak
+            # menimpa hasil sebelumnya walau nama dokumennya sama.
+            save_check_history(report)
+
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if job:
+                    job["status"] = "done"
+                    job["eta_seconds"] = 0.0
+                    job["report"] = report.model_dump()
+        except Exception as e:
+            logger.error(f"Job {job_id} failed: {e}")
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if job:
+                    job["status"] = "error"
+                    job["error_message"] = str(e)
+
+    threading.Thread(target=_run_job, daemon=True).start()
+
+    return {"job_id": job_id, "total_blocks": total_blocks}
+
+
+@app.get("/api/check/status/{job_id}")
+async def get_check_job_status(job_id: str):
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job tidak ditemukan.")
+        return dict(job)
 
 
 class ExportDocxRequest(BaseModel):
@@ -222,20 +339,15 @@ async def chat_with_assistant(req: ChatRequest):
 
 @app.get("/api/reports")
 async def list_reports():
-    reports = []
-    for f in output_dir.glob("*.json"):
-        reports.append({
-            "filename": f.name,
-            "size": f.stat().st_size,
-            "created": f.stat().st_mtime,
-        })
-    reports.sort(key=lambda x: x["created"], reverse=True)
+    """Riwayat SEMUA hasil cek dari Supabase - setiap run tercatat sebagai baris
+    terpisah, bukan cuma hasil terakhir per nama dokumen."""
+    reports = list_check_history()
     return {"reports": reports}
 
 
-@app.get("/api/reports/{filename}")
-async def get_report_file(filename: str):
-    file_path = output_dir / filename
-    if not file_path.is_file():
+@app.get("/api/reports/{history_id}")
+async def get_report_file(history_id: str):
+    row = get_check_history_by_id(history_id)
+    if not row:
         raise HTTPException(status_code=404, detail="Laporan tidak ditemukan.")
-    return FileResponse(path=file_path, media_type="application/json")
+    return row["full_report"]

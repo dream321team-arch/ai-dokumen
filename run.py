@@ -1,8 +1,9 @@
-#!/usr/bin/env python
-"""
-Main entrypoint for AI Document Checker CLI.
-"""
+import sys
 from src.cli import main
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[!] Program dihentikan.")
+        sys.exit(0)

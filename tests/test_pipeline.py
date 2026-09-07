@@ -106,10 +106,10 @@ def test_claude_reviewer_uninitialized():
 def test_settings_attributes():
     from src.config import settings
     assert hasattr(settings, "NVIDIA_API_KEY")
+    assert hasattr(settings, "NVIDIA_LLM_MODEL")
     assert hasattr(settings, "ANTHROPIC_API_KEY")
     assert hasattr(settings, "CLAUDE_MODEL")
-    assert hasattr(settings, "NVIDIA_EMBED_URL")
-    assert hasattr(settings, "NVIDIA_RERANK_URL")
+    assert hasattr(settings, "KIMI_MODEL")
 
 
 def test_text_span_error_schema():

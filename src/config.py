@@ -15,7 +15,19 @@ class Settings:
     )
     OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash")
 
-    # NVIDIA API settings (Embeddings, Reranking & LLM Fallback)
+    # OpenRouter Fallback settings (dipakai otomatis jika OPENROUTER_* primer gagal/error)
+    OPENROUTER_FALLBACK_API_KEY: str = os.getenv("OPENROUTER_FALLBACK_API_KEY", "")
+    OPENROUTER_FALLBACK_BASE_URL: str = os.getenv(
+        "OPENROUTER_FALLBACK_BASE_URL", "https://openrouter.ai/api/v1"
+    )
+    OPENROUTER_FALLBACK_MODEL: str = os.getenv("OPENROUTER_FALLBACK_MODEL", "openai/gpt-4o")
+
+    # Moonshot AI / Kimi settings
+    KIMI_API_KEY: str = os.getenv("KIMI_API_KEY", "")
+    KIMI_BASE_URL: str = os.getenv("KIMI_BASE_URL", "https://integrate.api.nvidia.com/v1")
+    KIMI_MODEL: str = os.getenv("KIMI_MODEL", "moonshotai/kimi-k3")
+
+    # NVIDIA API settings (Nemotron 3.5 Lightning — LLM Reviewer)
     NVIDIA_API_KEY: str = os.getenv("NVIDIA_API_KEY", "")
     NVIDIA_BASE_URL: str = os.getenv(
         "NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"
@@ -24,19 +36,9 @@ class Settings:
         "NVIDIA_LLM_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b"
     )
     NVIDIA_CHAT_MODEL: str = os.getenv(
-        "NVIDIA_CHAT_MODEL", "openai/gpt-oss-120b"
+        "NVIDIA_CHAT_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b"
     )
     NVIDIA_CHAT_API_KEY: str = os.getenv("NVIDIA_CHAT_API_KEY", "")
-    NVIDIA_EMBED_URL: str = os.getenv(
-        "NVIDIA_EMBED_URL", "https://integrate.api.nvidia.com/v1/embeddings"
-    )
-    NVIDIA_EMBED_MODEL: str = os.getenv(
-        "NVIDIA_EMBED_MODEL", "nvidia/llama-nemotron-embed-1b-v2"
-    )
-    NVIDIA_RERANK_URL: str = os.getenv(
-        "NVIDIA_RERANK_URL",
-        "https://ai.api.nvidia.com/v1/retrieval/nvidia/llama-nemotron-rerank-vl-1b-v2/reranking",
-    )
 
     # Anthropic settings
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
@@ -46,6 +48,9 @@ class Settings:
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    # Supabase (Postgres + pgvector) — pedoman & riwayat hasil cek
+    SUPABASE_DB_URL: str = os.getenv("SUPABASE_DB_URL", "")
 
     # Vector store & Chunking parameters
     CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "./.chroma_data")

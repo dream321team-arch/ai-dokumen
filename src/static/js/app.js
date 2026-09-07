@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupDragAndDrop();
   loadGuidelines();
   loadHistory();
+  loadRefSelectionCheckboxes();
 
   // Close export dropdown when clicking outside
   document.addEventListener('click', (e) => {
@@ -108,7 +109,72 @@ function handleFileSelect(event) {
   }
 }
 
-// Process Document Upload (DOCX, PDF, TXT, etc.) & Run Check
+// Reference document selection (which pedoman to use for the scan)
+let refSelectionFiles = [];
+let refCheckJobPoller = null;
+
+async function loadRefSelectionCheckboxes() {
+  const listEl = document.getElementById('ref-selection-list');
+  if (!listEl) return;
+  try {
+    const res = await fetch('/api/guidelines');
+    const data = await res.json();
+    refSelectionFiles = (data.guidelines || []).map(g => g.name);
+
+    listEl.innerHTML = refSelectionFiles.map(name => `
+      <label class="ref-checkbox-item">
+        <input type="checkbox" class="ref-checkbox" value="${name}" checked onchange="updateRefSelectionCount()">
+        ${name}
+      </label>
+    `).join('') || '<span style="color: var(--text-muted); font-size: 0.8rem;">Belum ada dokumen pedoman ter-index.</span>';
+
+    updateRefSelectionCount();
+  } catch (err) {
+    listEl.innerHTML = '<span style="color: var(--danger); font-size: 0.8rem;">Gagal memuat daftar pedoman.</span>';
+  }
+}
+
+function toggleRefSelectionPanel() {
+  const body = document.getElementById('ref-selection-body');
+  const chevron = document.getElementById('ref-selection-chevron');
+  if (!body) return;
+  const isHidden = body.style.display === 'none' || !body.style.display;
+  body.style.display = isHidden ? 'block' : 'none';
+  if (chevron) chevron.style.transform = isHidden ? 'rotate(180deg)' : 'rotate(0deg)';
+}
+
+function updateRefSelectionCount() {
+  const checkboxes = document.querySelectorAll('.ref-checkbox');
+  const checked = Array.from(checkboxes).filter(cb => cb.checked);
+  const countEl = document.getElementById('ref-selection-count');
+  if (!countEl) return;
+  if (checked.length === 0 || checked.length === checkboxes.length) {
+    countEl.textContent = 'Semua';
+  } else {
+    countEl.textContent = `${checked.length} dipilih`;
+  }
+}
+
+// Returns null (meaning "use all guidelines") or an array of selected filenames
+function getSelectedRefs() {
+  const checkboxes = document.querySelectorAll('.ref-checkbox');
+  if (checkboxes.length === 0) return null;
+  const checked = Array.from(checkboxes).filter(cb => cb.checked).map(cb => cb.value);
+  if (checked.length === 0 || checked.length === checkboxes.length) return null;
+  return checked;
+}
+
+function formatEta(seconds) {
+  if (seconds == null || isNaN(seconds) || seconds < 0) return 'Menghitung estimasi waktu...';
+  const s = Math.round(seconds);
+  if (s <= 1) return 'Hampir selesai...';
+  if (s < 60) return `Estimasi sisa waktu: ~${s} detik`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `Estimasi sisa waktu: ~${m} menit ${rem} detik`;
+}
+
+// Process Document Upload (DOCX, PDF, TXT, etc.) & Run Check (job-based with live progress)
 async function processDocFile(file) {
   if (!isFileSupported(file.name)) {
     alert(`Format file "${file.name}" tidak didukung.\nGunakan format: DOCX, DOC, PDF, TXT, RTF, atau MD.`);
@@ -120,47 +186,108 @@ async function processDocFile(file) {
   const resultsWrapper = document.getElementById('results-wrapper');
   const statsSummary = document.getElementById('stats-summary');
   const scoreBanner = document.getElementById('score-banner');
+  const progressFill = document.getElementById('progress-bar-fill');
+  const progressBlocksText = document.getElementById('progress-blocks-text');
+  const progressEtaText = document.getElementById('progress-eta-text');
+  const progressErrorsLog = document.getElementById('progress-errors-log');
 
   dropZone.style.display = 'none';
   loadingContainer.style.display = 'block';
   resultsWrapper.style.display = 'none';
   if (scoreBanner) scoreBanner.style.display = 'none';
+  if (progressFill) progressFill.style.width = '0%';
+  if (progressBlocksText) progressBlocksText.textContent = '0 / 0 blok';
+  if (progressEtaText) progressEtaText.textContent = 'Menghitung estimasi waktu...';
+  if (progressErrorsLog) {
+    progressErrorsLog.innerHTML = '';
+    progressErrorsLog.style.display = 'none';
+  }
 
   const formData = new FormData();
   formData.append('file', file);
+  const selectedRefs = getSelectedRefs();
+  if (selectedRefs) formData.append('selected_refs', JSON.stringify(selectedRefs));
+
+  const resetToUploadState = () => {
+    loadingContainer.style.display = 'none';
+    dropZone.style.display = 'block';
+    if (refCheckJobPoller) {
+      clearInterval(refCheckJobPoller);
+      refCheckJobPoller = null;
+    }
+  };
 
   try {
-    const response = await fetch('/api/check', {
-      method: 'POST',
-      body: formData
-    });
-
-    if (!response.ok) {
-      const errData = await response.json();
-      throw new Error(errData.detail || 'Gagal memproses pemeriksaan dokumen.');
+    const startRes = await fetch('/api/check/start', { method: 'POST', body: formData });
+    if (!startRes.ok) {
+      const errData = await startRes.json();
+      throw new Error(errData.detail || 'Gagal memulai pemeriksaan dokumen.');
     }
+    const { job_id, total_blocks } = await startRes.json();
+    if (progressBlocksText) progressBlocksText.textContent = `0 / ${total_blocks} blok`;
 
-    const report = await response.json();
-    currentReportData = report;
+    const shownErrorIds = new Set();
 
-    // Reset accepted set to include all revision blocks by default
-    acceptedBlockRevisions.clear();
-    report.blocks.forEach(b => {
-      if (b.suggested_revision) acceptedBlockRevisions.add(b.block_id);
-    });
+    refCheckJobPoller = setInterval(async () => {
+      try {
+        const statusRes = await fetch(`/api/check/status/${job_id}`);
+        if (!statusRes.ok) throw new Error('Job status tidak ditemukan.');
+        const job = await statusRes.json();
 
-    loadingContainer.style.display = 'none';
-    dropZone.style.display = 'block';
-    statsSummary.style.display = 'grid';
-    if (scoreBanner) scoreBanner.style.display = 'flex';
-    resultsWrapper.style.display = 'block';
+        const pct = job.total_blocks ? Math.round((job.completed_blocks / job.total_blocks) * 100) : 0;
+        if (progressFill) progressFill.style.width = `${pct}%`;
+        if (progressBlocksText) progressBlocksText.textContent = `${job.completed_blocks} / ${job.total_blocks} blok`;
+        if (progressEtaText) progressEtaText.textContent = formatEta(job.eta_seconds);
 
-    renderReport(report);
-    checkSystemStatus();
+        if (job.errors && job.errors.length > 0 && progressErrorsLog) {
+          progressErrorsLog.style.display = 'block';
+          job.errors.forEach(err => {
+            const key = `${err.block_id}:${err.message}`;
+            if (!shownErrorIds.has(key)) {
+              shownErrorIds.add(key);
+              const item = document.createElement('div');
+              item.className = 'progress-error-item';
+              item.textContent = `Blok ${err.block_id}: ${err.message}`;
+              progressErrorsLog.appendChild(item);
+            }
+          });
+        }
+
+        if (job.status === 'done') {
+          clearInterval(refCheckJobPoller);
+          refCheckJobPoller = null;
+
+          const report = job.report;
+          currentReportData = report;
+          acceptedBlockRevisions.clear();
+          report.blocks.forEach(b => {
+            if (b.suggested_revision) acceptedBlockRevisions.add(b.block_id);
+          });
+
+          loadingContainer.style.display = 'none';
+          dropZone.style.display = 'block';
+          statsSummary.style.display = 'grid';
+          if (scoreBanner) scoreBanner.style.display = 'flex';
+          resultsWrapper.style.display = 'block';
+
+          renderReport(report);
+          checkSystemStatus();
+        } else if (job.status === 'error') {
+          clearInterval(refCheckJobPoller);
+          refCheckJobPoller = null;
+          resetToUploadState();
+          alert(`Error: ${job.error_message || 'Gagal memproses pemeriksaan dokumen.'}`);
+        }
+      } catch (pollErr) {
+        clearInterval(refCheckJobPoller);
+        refCheckJobPoller = null;
+        resetToUploadState();
+        alert(`Error: ${pollErr.message}`);
+      }
+    }, 1200);
 
   } catch (err) {
-    loadingContainer.style.display = 'none';
-    dropZone.style.display = 'block';
+    resetToUploadState();
     alert(`Error: ${err.message}`);
   }
 }
@@ -999,19 +1126,21 @@ async function loadHistory() {
     tbody.innerHTML = '';
 
     if (!data.reports || data.reports.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color: var(--text-muted); padding: 2rem;">Belum ada riwayat laporan tersimpan.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color: var(--text-muted); padding: 2rem;">Belum ada riwayat laporan tersimpan.</td></tr>`;
       return;
     }
 
     data.reports.forEach(r => {
-      const dateStr = new Date(r.created * 1000).toLocaleString('id-ID');
+      const dateStr = new Date(r.checked_at).toLocaleString('id-ID');
+      const scoreStr = r.score != null ? Number(r.score).toFixed(1) : '-';
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td><i class="fa-solid fa-file-code" style="color: var(--primary-blue); margin-right: 0.5rem;"></i> <strong>${escapeHTML(r.filename)}</strong></td>
-        <td>${(r.size / 1024).toFixed(1)} KB</td>
+        <td><i class="fa-solid fa-file-lines" style="color: var(--primary-blue); margin-right: 0.5rem;"></i> <strong>${escapeHTML(r.document_name)}</strong></td>
+        <td>${scoreStr}</td>
+        <td>${r.grade ? escapeHTML(r.grade) : '-'}</td>
         <td>${dateStr}</td>
         <td>
-          <a href="/api/reports/${encodeURIComponent(r.filename)}" target="_blank" class="btn btn-secondary btn-sm">
+          <a href="/api/reports/${encodeURIComponent(r.id)}" target="_blank" class="btn btn-secondary btn-sm">
             <i class="fa-solid fa-eye"></i> Lihat JSON
           </a>
         </td>
@@ -1019,7 +1148,7 @@ async function loadHistory() {
       tbody.appendChild(tr);
     });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="4" style="color: var(--danger);">Gagal memuat riwayat laporan.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" style="color: var(--danger);">Gagal memuat riwayat laporan.</td></tr>`;
   }
 }
 

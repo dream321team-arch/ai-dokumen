@@ -1,3 +1,4 @@
+import os
 import sys
 import json
 import logging
@@ -49,6 +50,14 @@ def main():
         default="./output/hasil.json",
         help="Path where JSON report will be saved (default: ./output/hasil.json)",
     )
+    check_parser.add_argument(
+        "--refs",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Optional list of reference guideline file names to restrict the check "
+        "to (default: all indexed guidelines). Example: --refs \"UU 12 Tahun 2011.pdf\"",
+    )
 
     # Command: serve
     serve_parser = subparsers.add_parser(
@@ -57,14 +66,14 @@ def main():
     serve_parser.add_argument(
         "--host",
         type=str,
-        default="127.0.0.1",
-        help="Host interface to bind (default: 127.0.0.1)",
+        default=os.environ.get("HOST", "0.0.0.0"),
+        help="Host interface to bind (default: 0.0.0.0, or $HOST if set)",
     )
     serve_parser.add_argument(
         "--port",
         type=int,
-        default=8000,
-        help="Port number to listen on (default: 8000)",
+        default=int(os.environ.get("PORT", 8000)),
+        help="Port number to listen on (default: 8000, or $PORT if set)",
     )
 
     args = parser.parse_args()
@@ -76,7 +85,16 @@ def main():
 
     elif args.command == "check":
         print(f"[*] Checking document: {args.input}")
-        report = check_document(args.input)
+        if args.refs:
+            print(f"[*] Menggunakan referensi terpilih: {', '.join(args.refs)}")
+
+        def _print_progress(info):
+            pct = int(info["completed"] * 100 / info["total"]) if info["total"] else 100
+            print(f"    [progress] {info['completed']}/{info['total']} blok ({pct}%)")
+
+        report = check_document(
+            args.input, selected_references=args.refs, progress_callback=_print_progress
+        )
 
         # Output JSON saving
         output_path = Path(args.output)
@@ -92,8 +110,22 @@ def main():
 
     elif args.command == "serve":
         import uvicorn
+        # Render (and most PaaS) set RENDER=true in their build/runtime env - use
+        # that to auto-disable the dev-only file watcher/auto-reload in production,
+        # without needing a separate flag for local vs. deployed runs.
+        is_production = bool(os.environ.get("RENDER"))
         print(f"[*] Starting AI Document Checker Web Server on http://{args.host}:{args.port}")
-        uvicorn.run("src.web_app:app", host=args.host, port=args.port, reload=True)
+        print("[*] Tekan CTRL+C untuk menghentikan server.")
+        try:
+            uvicorn.run(
+                "src.web_app:app",
+                host=args.host,
+                port=args.port,
+                reload=not is_production,
+            )
+        except KeyboardInterrupt:
+            print("\n[!] Server dihentikan oleh pengguna (CTRL+C).")
+            sys.exit(0)
 
     else:
         parser.print_help()
@@ -101,4 +133,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[!] Program dihentikan.")
+        sys.exit(0)
