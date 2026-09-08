@@ -257,11 +257,17 @@ def check_document(
         best_fallback_chunks: List[Chunk] = []
         best_fallback_score = -1.0
 
+        # Hitung embedding teks blok SEKALI saja, dipakai ulang untuk pencarian
+        # cascading per-dokumen di bawah (bisa sampai beberapa dokumen kandidat) -
+        # sebelumnya di-embed ulang tiap iterasi dokumen, boros CPU tanpa perlu
+        # karena teksnya sama persis.
+        block_embedding = vector_store._embed([block.text])[0]
+
         for doc_name in ordered_reference_docs:
             doc_chunks = vector_store.query(
-                text=block.text,
                 top_k=settings.RETRIEVAL_TOP_K,
                 document_names=[doc_name],
+                precomputed_embedding=block_embedding,
             )
             if not doc_chunks:
                 continue

@@ -108,18 +108,24 @@ class VectorStore:
 
     def query(
         self,
-        text: str,
+        text: Optional[str] = None,
         top_k: Optional[int] = None,
         document_names: Optional[List[str]] = None,
+        precomputed_embedding: Optional[List[float]] = None,
     ) -> List[Chunk]:
         """
         Mencari chunks terkait lewat pencarian kemiripan vector (pgvector) di Supabase.
 
         Args:
-            text: Query text string
+            text: Query text string. Boleh diisi None kalau `precomputed_embedding`
+                sudah disediakan (menghindari hitung ulang embedding untuk teks yang
+                sama di banyak panggilan, mis. pencarian cascading per-dokumen).
             top_k: Number of nearest neighbors to retrieve
             document_names: Optional list of document_name values to restrict the
                 search to (e.g. only search selected reference guideline files).
+            precomputed_embedding: Vector embedding yang sudah dihitung sebelumnya
+                untuk `text` yang sama - hemat komputasi kalau query yang sama mau
+                dipakai ulang untuk beberapa pencarian (mis. per-dokumen berbeda).
 
         Returns:
             List of matching Chunk objects.
@@ -128,7 +134,7 @@ class VectorStore:
         matched_chunks: List[Chunk] = []
 
         try:
-            query_embedding = self._embed([text])[0]
+            query_embedding = precomputed_embedding if precomputed_embedding is not None else self._embed([text])[0]
             with self.conn.cursor() as cur:
                 cur.execute(
                     "select id, document_name, page_number, section_title, content "

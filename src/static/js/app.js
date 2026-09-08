@@ -229,10 +229,12 @@ async function processDocFile(file) {
     const shownErrorIds = new Set();
     let consecutivePollFailures = 0;
     // Instance gratis (Render dkk) kadang restart sebentar di tengah proses
-    // (mis. kehabisan RAM lalu auto-restart). Status job tetap aman tersimpan
-    // di Supabase, jadi jangan langsung nyerah di 1 kali polling gagal -
-    // toleransi dulu beberapa kali sebelum benar-benar dianggap job hilang.
-    const MAX_CONSECUTIVE_POLL_FAILURES = 15;
+    // (mis. kehabisan RAM lalu auto-restart, atau redeploy manual). Dari
+    // observasi nyata, satu siklus restart Render bisa makan ~50 detik
+    // (build cache warm + reload model embedding) sebelum server merespons
+    // lagi. Status job tetap aman tersimpan di Supabase, jadi toleransi
+    // sampai ~90 detik (75 x 1.2 detik) sebelum benar-benar dianggap gagal.
+    const MAX_CONSECUTIVE_POLL_FAILURES = 75;
 
     refCheckJobPoller = setInterval(async () => {
       let statusRes;
