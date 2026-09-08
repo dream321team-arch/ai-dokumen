@@ -62,7 +62,10 @@ active_runtime_model = settings.OPENROUTER_MODEL
 # Status job proses check disimpan di Supabase (bukan dict in-memory) supaya
 # tahan restart server (mis. instance Render free-tier yang bisa restart
 # mendadak) - progress tidak hilang begitu saja pas frontend lagi polling.
-DEFAULT_SECONDS_PER_BLOCK = 8.0
+# Nilai ini cuma dipakai sebagai estimasi ETA awal (sebelum ada data progress
+# nyata) - berdasarkan observasi run sungguhan, ~20-30 detik/request lebih
+# akurat daripada 8 detik yang lama.
+DEFAULT_SECONDS_PER_BLOCK = 25.0
 
 
 def _is_supported_file(filename: str) -> bool:
@@ -213,7 +216,7 @@ async def start_check_job(
         raise HTTPException(status_code=400, detail=f"Gagal membaca dokumen: {e}")
 
     job_id = uuid.uuid4().hex
-    max_workers = min(5, total_blocks) if total_blocks else 1
+    max_workers = min(3, total_blocks) if total_blocks else 1  # samain dengan pipeline.py
     initial_eta = (DEFAULT_SECONDS_PER_BLOCK * total_blocks / max_workers) if total_blocks else 0.0
 
     create_job(job_id, total_blocks=total_blocks, filename=file.filename, eta_seconds=initial_eta)

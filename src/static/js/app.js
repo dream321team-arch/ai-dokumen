@@ -227,11 +227,45 @@ async function processDocFile(file) {
     if (progressBlocksText) progressBlocksText.textContent = `0 / ${total_blocks} blok`;
 
     const shownErrorIds = new Set();
+    let consecutivePollFailures = 0;
+    // Instance gratis (Render dkk) kadang restart sebentar di tengah proses
+    // (mis. kehabisan RAM lalu auto-restart). Status job tetap aman tersimpan
+    // di Supabase, jadi jangan langsung nyerah di 1 kali polling gagal -
+    // toleransi dulu beberapa kali sebelum benar-benar dianggap job hilang.
+    const MAX_CONSECUTIVE_POLL_FAILURES = 15;
 
     refCheckJobPoller = setInterval(async () => {
+      let statusRes;
       try {
-        const statusRes = await fetch(`/api/check/status/${job_id}`);
-        if (!statusRes.ok) throw new Error('Job status tidak ditemukan.');
+        statusRes = await fetch(`/api/check/status/${job_id}`);
+      } catch (networkErr) {
+        // Server lagi restart/nggak bisa dihubungi sesaat - kegagalan jaringan
+        // begini juga ditoleransi dulu, sama seperti respons non-OK di bawah.
+        statusRes = null;
+      }
+
+      if (!statusRes || !statusRes.ok) {
+        if (statusRes && statusRes.status === 404) {
+          clearInterval(refCheckJobPoller);
+          refCheckJobPoller = null;
+          resetToUploadState();
+          alert('Error: Job status tidak ditemukan.');
+          return;
+        }
+        // Kegagalan sementara (network error / 5xx / server lagi restart) -
+        // jangan langsung nyerah, coba lagi di polling berikutnya.
+        consecutivePollFailures++;
+        if (consecutivePollFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
+          clearInterval(refCheckJobPoller);
+          refCheckJobPoller = null;
+          resetToUploadState();
+          alert('Error: Server tidak merespons setelah beberapa kali percobaan.');
+        }
+        return;
+      }
+      consecutivePollFailures = 0;
+
+      try {
         const job = await statusRes.json();
 
         const pct = job.total_blocks ? Math.round((job.completed_blocks / job.total_blocks) * 100) : 0;

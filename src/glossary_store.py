@@ -10,7 +10,9 @@ logger = logging.getLogger(__name__)
 def _connect():
     if not settings.SUPABASE_DB_URL:
         raise ValueError("SUPABASE_DB_URL belum diisi di .env - tidak bisa menyimpan glosarium.")
-    return psycopg2.connect(settings.SUPABASE_DB_URL)
+    # connect_timeout mencegah nge-hang tanpa batas kalau koneksi ke Supabase
+    # lambat/putus - lebih baik gagal cepat & jelas daripada diam selamanya.
+    return psycopg2.connect(settings.SUPABASE_DB_URL, connect_timeout=10)
 
 
 def save_ketentuan_umum_definitions(definitions: List[Dict[str, Any]]) -> None:

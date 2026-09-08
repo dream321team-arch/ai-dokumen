@@ -141,6 +141,7 @@ class OpenRouterReviewer:
                 self.groq_client = OpenAI(
                     base_url=settings.GROQ_BASE_URL,
                     api_key=settings.GROQ_API_KEY.strip(),
+                    timeout=20.0,
                 )
                 logger.info("Groq fallback client initialized in Reviewer")
             except Exception as ge:

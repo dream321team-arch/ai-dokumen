@@ -30,7 +30,20 @@ class VectorStore:
             raise ValueError(
                 "SUPABASE_DB_URL belum diisi di .env - tidak bisa terhubung ke database pedoman."
             )
-        self.conn = psycopg2.connect(self.db_url)
+        # connect_timeout membatasi waktu tunggu koneksi awal; keepalives + statement_timeout
+        # mencegah koneksi yang "diam-diam mati" (mis. jaringan idle lama saat menunggu LLM
+        # antar-blok) membuat query berikutnya nge-hang selamanya tanpa pernah error - ini
+        # instance dipakai berulang sepanjang satu proses check_document() yang bisa berjalan
+        # puluhan menit, jadi rentan kena kondisi ini kalau tidak dijaga.
+        self.conn = psycopg2.connect(
+            self.db_url,
+            connect_timeout=10,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=3,
+            options="-c statement_timeout=30000",
+        )
         self.conn.autocommit = True
         register_vector(self.conn)
         self.nvidia_client = NvidiaClient()

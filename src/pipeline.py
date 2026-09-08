@@ -304,9 +304,13 @@ def check_document(
         review_res = _post_process_review(review_res, reranked_chunks)
         return review_res
 
-    # Gunakan multithreading untuk mempercepat pemrosesan. Dibatasi ke 3 sekaligus
-    # (bukan 5) supaya tidak gampang nabrak rate limit provider (mis. batas
-    # 20 request/menit pada akun OpenRouter baru).
+    # Gunakan multithreading untuk mempercepat pemrosesan. PERNAH dicoba naikkan
+    # ke 8 paralel, tapi ternyata akun OpenRouter baru punya batas ketat 20
+    # request/menit KHUSUS per model ("new-account-rpm") plus batas kredit
+    # gabungan untuk request yang lagi jalan bersamaan ("in_flight_budget") -
+    # di 8 paralel dua batas itu langsung kena, menyebabkan banyak block masuk
+    # retry/backoff panjang. Balik ke 3 supaya tetap di bawah 20rpm dengan
+    # aman (3 x maks ~1 request/4-5 detik masih longgar).
     max_workers = min(3, len(blocks)) if blocks else 1
     block_results_map = {}
     completed_count = 0
