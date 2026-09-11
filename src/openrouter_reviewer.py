@@ -430,6 +430,7 @@ class OpenRouterReviewer:
                 if status not in ["sesuai", "perlu_revisi", "ejaan_tanda_baca", "tidak_ditemukan_rujukan"]:
                     status = "sesuai" if retrieved_chunks else "tidak_ditemukan_rujukan"
                 parsed_json["status"] = status
+                self._sanitize_rule_reference(parsed_json)
                 result = BlockReviewResult(**parsed_json)
                 if (result.status in ["sesuai", "perlu_revisi"]) and not result.rule_reference and retrieved_chunks:
                     top_c = retrieved_chunks[0]
@@ -478,6 +479,7 @@ class OpenRouterReviewer:
                 if status not in ["sesuai", "perlu_revisi", "ejaan_tanda_baca", "tidak_ditemukan_rujukan"]:
                     status = "sesuai" if retrieved_chunks else "tidak_ditemukan_rujukan"
                 parsed_json["status"] = status
+                self._sanitize_rule_reference(parsed_json)
                 result = BlockReviewResult(**parsed_json)
                 if (result.status in ["sesuai", "perlu_revisi"]) and not result.rule_reference and retrieved_chunks:
                     top_c = retrieved_chunks[0]
