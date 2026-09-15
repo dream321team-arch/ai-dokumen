@@ -316,9 +316,12 @@ def check_document(
     # request/menit KHUSUS per model ("new-account-rpm") plus batas kredit
     # gabungan untuk request yang lagi jalan bersamaan ("in_flight_budget") -
     # di 8 paralel dua batas itu langsung kena, menyebabkan banyak block masuk
-    # retry/backoff panjang. Balik ke 3 supaya tetap di bawah 20rpm dengan
-    # aman (3 x maks ~1 request/4-5 detik masih longgar).
-    max_workers = min(3, len(blocks)) if blocks else 1
+    # retry/backoff panjang. Diturunkan lagi dari 3 ke 1 karena hosting Render
+    # free tier cuma 512MB RAM - 3 worker paralel (tiap satu nyimpan konteks
+    # chunk+prompt+response sendiri-sendiri) bikin instance OOM dan restart
+    # di tengah proses (lihat Render Events: "Instance failed"), bahkan untuk
+    # dokumen kecil. 1 worker = lebih lambat tapi tidak OOM.
+    max_workers = 1
     block_results_map = {}
     completed_count = 0
 
