@@ -225,6 +225,7 @@ def check_document(
         "perlu_revisi": 0,
         "ejaan_tanda_baca": 0,
         "tidak_ditemukan_rujukan": 0,
+        "gagal_dianalisis": 0,
     }
 
     error_type_totals: Dict[str, int] = {
@@ -359,12 +360,15 @@ def check_document(
         if block.block_id in block_results_map:
             review_res = block_results_map[block.block_id]
         else:
+            # process_single_block() melempar exception tak tertangani (bukan
+            # sekadar LLM gagal merespons, tapi error sistem mis. vector search
+            # crash) — blok ini juga belum benar-benar diperiksa.
             review_res = BlockReviewResult(
                 block_id=block.block_id,
                 page_number=block.page_number,
                 original_text=block.text,
-                status="tidak_ditemukan_rujukan",
-                issue="Gagal memproses blok.",
+                status="gagal_dianalisis",
+                issue="Gagal dianalisis: terjadi kesalahan sistem saat memproses blok ini. Mohon tinjau manual.",
             )
 
         block_results.append(review_res)

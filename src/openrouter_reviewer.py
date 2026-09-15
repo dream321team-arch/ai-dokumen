@@ -236,6 +236,88 @@ class OpenRouterReviewer:
         if isinstance(ref, dict) and (not ref.get("document") or ref.get("page") is None):
             parsed_json["rule_reference"] = None
 
+    @staticmethod
+    def _stream_completion(client: OpenAI, model: Optional[str], messages: list) -> str:
+        """
+        Calls chat.completions.create with stream=True and accumulates the
+        streamed delta chunks into the full response text.
+
+        Streaming is used UNCONDITIONALLY (instead of a plain non-streaming
+        call) because some OpenAI-compatible third-party routers always
+        respond in SSE streaming format regardless of the `stream` request
+        parameter — a plain non-streaming call against those returns a
+        stream body that the client can't parse as a single JSON object,
+        causing every request to fail. Requesting streaming explicitly and
+        reassembling the chunks works against both kinds of endpoint, so
+        this is a safe default for every provider used here (primary,
+        fallback, Groq).
+        """
+        stream = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.1,
+            max_tokens=4096,
+            stream=True,
+        )
+        parts = []
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta_content = chunk.choices[0].delta.content
+            if delta_content:
+                parts.append(delta_content)
+        return "".join(parts)
+
+    def _parse_review_response(
+        self, content: str, block: Block, retrieved_chunks: List[Chunk]
+    ) -> BlockReviewResult:
+        """
+        Shared cleanup/parsing/validation for a raw LLM response string into
+        a BlockReviewResult — used identically by the primary, OpenRouter
+        fallback, and Groq call sites so this logic only needs to be
+        correct (and fixed, if it ever needs fixing) in one place.
+        """
+        cleaned_content = re.sub(r"^```json\s*", "", content.strip(), flags=re.IGNORECASE)
+        cleaned_content = re.sub(r"\s*```$", "", cleaned_content)
+
+        json_match = re.search(r"\{[\s\S]*\}", cleaned_content)
+        if json_match:
+            cleaned_content = json_match.group(0)
+
+        parsed_json = json.loads(cleaned_content)
+
+        parsed_json["block_id"] = block.block_id
+        parsed_json["original_text"] = block.text
+
+        raw_span_errors = parsed_json.get("span_errors", [])
+        parsed_json["span_errors"] = (
+            self._validate_and_fix_span_errors(raw_span_errors, block.text)
+            if isinstance(raw_span_errors, list)
+            else []
+        )
+
+        status = parsed_json.get("status", "sesuai")
+        if status not in ["sesuai", "perlu_revisi", "ejaan_tanda_baca", "tidak_ditemukan_rujukan"]:
+            status = "sesuai" if retrieved_chunks else "tidak_ditemukan_rujukan"
+        parsed_json["status"] = status
+        self._sanitize_rule_reference(parsed_json)
+
+        result = BlockReviewResult(**parsed_json)
+
+        if (result.status in ["sesuai", "perlu_revisi"]) and not result.rule_reference and retrieved_chunks:
+            top_c = retrieved_chunks[0]
+            result.rule_reference = RuleReference(
+                document=top_c.document_name,
+                page=top_c.page_number,
+                section=top_c.section_title,
+            )
+
+        if result.status == "sesuai" and len(result.span_errors) > 0:
+            has_pedoman = any(e.error_type == "pedoman" for e in result.span_errors)
+            result.status = "perlu_revisi" if has_pedoman else "ejaan_tanda_baca"
+
+        return result
+
     def review_block(
         self,
         block: Block,
@@ -300,8 +382,10 @@ class OpenRouterReviewer:
         )
 
         if self.client is None:
-            # Deterministic fallback when client uninitialized
-            status = "sesuai" if retrieved_chunks else "tidak_ditemukan_rujukan"
+            # Blok ini TIDAK PERNAH benar-benar diperiksa (API key belum ada) —
+            # dulu ditandai "sesuai"/"tidak_ditemukan_rujukan" yang menyesatkan
+            # (kelihatan seperti sudah dicek AI dan aman). Sekarang pakai status
+            # eksplisit "gagal_dianalisis" supaya jelas butuh pengecekan manual.
             top_ref = (
                 RuleReference(
                     document=retrieved_chunks[0].document_name,
@@ -314,8 +398,8 @@ class OpenRouterReviewer:
             return BlockReviewResult(
                 block_id=block.block_id,
                 original_text=block.text,
-                status=status,
-                issue="API Key belum dikonfigurasi di .env",
+                status="gagal_dianalisis",
+                issue="Gagal dianalisis: API Key LLM belum dikonfigurasi di .env. Blok ini belum diperiksa AI sama sekali.",
                 rule_reference=top_ref,
             )
 
@@ -324,65 +408,15 @@ class OpenRouterReviewer:
         for attempt in range(max_retries + 1):
             try:
                 # Buat request ke OpenRouter - model parameter WAJIB!
-                completion = self.client.chat.completions.create(
-                    model=self.model,  # OpenRouter WAJIB butuh model parameter
-                    messages=[
+                content = self._stream_completion(
+                    self.client,
+                    self.model,  # OpenRouter WAJIB butuh model parameter
+                    [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=0.1,
-                    max_tokens=4096,
                 )
-
-                content = completion.choices[0].message.content or ""
-
-                # Clean markdown blocks
-                cleaned_content = re.sub(r"^```json\s*", "", content.strip(), flags=re.IGNORECASE)
-                cleaned_content = re.sub(r"\s*```$", "", cleaned_content)
-
-                # Extract JSON if extra text around
-                json_match = re.search(r"\{[\s\S]*\}", cleaned_content)
-                if json_match:
-                    cleaned_content = json_match.group(0)
-
-                parsed_json = json.loads(cleaned_content)
-
-                parsed_json["block_id"] = block.block_id
-                parsed_json["original_text"] = block.text
-
-                # Validate span_errors
-                raw_span_errors = parsed_json.get("span_errors", [])
-                if isinstance(raw_span_errors, list):
-                    parsed_json["span_errors"] = self._validate_and_fix_span_errors(
-                        raw_span_errors, block.text
-                    )
-                else:
-                    parsed_json["span_errors"] = []
-
-                # Ensure status is valid enum
-                status = parsed_json.get("status", "sesuai")
-                if status not in ["sesuai", "perlu_revisi", "ejaan_tanda_baca", "tidak_ditemukan_rujukan"]:
-                    status = "sesuai" if retrieved_chunks else "tidak_ditemukan_rujukan"
-                parsed_json["status"] = status
-                self._sanitize_rule_reference(parsed_json)
-
-                result = BlockReviewResult(**parsed_json)
-
-                # If status is sesuai or perlu_revisi and we have retrieved chunks, ensure rule_reference is populated
-                if (result.status in ["sesuai", "perlu_revisi"]) and not result.rule_reference and retrieved_chunks:
-                    top_c = retrieved_chunks[0]
-                    result.rule_reference = RuleReference(
-                        document=top_c.document_name,
-                        page=top_c.page_number,
-                        section=top_c.section_title,
-                    )
-
-                # Auto-adjust status if span_errors exist
-                if result.status == "sesuai" and len(result.span_errors) > 0:
-                    has_pedoman = any(e.error_type == "pedoman" for e in result.span_errors)
-                    result.status = "perlu_revisi" if has_pedoman else "ejaan_tanda_baca"
-
-                return result
+                return self._parse_review_response(content, block, retrieved_chunks)
 
             except Exception as e:
                 last_exception = e
@@ -402,46 +436,15 @@ class OpenRouterReviewer:
         if self.fallback_client:
             try:
                 logger.info(f"Attempting OpenRouter fallback for block {block.block_id}...")
-                fb_comp = self.fallback_client.chat.completions.create(
-                    model=self.fallback_model,
-                    messages=[
+                fb_content = self._stream_completion(
+                    self.fallback_client,
+                    self.fallback_model,
+                    [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=0.1,
-                    max_tokens=4096,
                 )
-                fb_content = fb_comp.choices[0].message.content or ""
-                cleaned_fb = re.sub(r"^```json\s*", "", fb_content.strip(), flags=re.IGNORECASE)
-                cleaned_fb = re.sub(r"\s*```$", "", cleaned_fb)
-                json_match = re.search(r"\{[\s\S]*\}", cleaned_fb)
-                if json_match:
-                    cleaned_fb = json_match.group(0)
-                parsed_json = json.loads(cleaned_fb)
-                parsed_json["block_id"] = block.block_id
-                parsed_json["original_text"] = block.text
-                raw_span_errors = parsed_json.get("span_errors", [])
-                parsed_json["span_errors"] = (
-                    self._validate_and_fix_span_errors(raw_span_errors, block.text)
-                    if isinstance(raw_span_errors, list)
-                    else []
-                )
-                status = parsed_json.get("status", "sesuai")
-                if status not in ["sesuai", "perlu_revisi", "ejaan_tanda_baca", "tidak_ditemukan_rujukan"]:
-                    status = "sesuai" if retrieved_chunks else "tidak_ditemukan_rujukan"
-                parsed_json["status"] = status
-                self._sanitize_rule_reference(parsed_json)
-                result = BlockReviewResult(**parsed_json)
-                if (result.status in ["sesuai", "perlu_revisi"]) and not result.rule_reference and retrieved_chunks:
-                    top_c = retrieved_chunks[0]
-                    result.rule_reference = RuleReference(
-                        document=top_c.document_name,
-                        page=top_c.page_number,
-                        section=top_c.section_title,
-                    )
-                if result.status == "sesuai" and len(result.span_errors) > 0:
-                    has_pedoman = any(e.error_type == "pedoman" for e in result.span_errors)
-                    result.status = "perlu_revisi" if has_pedoman else "ejaan_tanda_baca"
+                result = self._parse_review_response(fb_content, block, retrieved_chunks)
                 logger.info(f"OpenRouter fallback successfully reviewed block {block.block_id}")
                 return result
             except Exception as fe:
@@ -451,60 +454,40 @@ class OpenRouterReviewer:
         if self.groq_client:
             try:
                 logger.info(f"Attempting Groq fallback for block {block.block_id}...")
-                groq_comp = self.groq_client.chat.completions.create(
-                    model=settings.GROQ_MODEL or "llama-3.3-70b-versatile",
-                    messages=[
+                groq_content = self._stream_completion(
+                    self.groq_client,
+                    settings.GROQ_MODEL or "llama-3.3-70b-versatile",
+                    [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=0.1,
-                    max_tokens=4096,
                 )
-                groq_content = groq_comp.choices[0].message.content or ""
-                cleaned_groq = re.sub(r"^```json\s*", "", groq_content.strip(), flags=re.IGNORECASE)
-                cleaned_groq = re.sub(r"\s*```$", "", cleaned_groq)
-                json_match = re.search(r"\{[\s\S]*\}", cleaned_groq)
-                if json_match:
-                    cleaned_groq = json_match.group(0)
-                parsed_json = json.loads(cleaned_groq)
-                parsed_json["block_id"] = block.block_id
-                parsed_json["original_text"] = block.text
-                raw_span_errors = parsed_json.get("span_errors", [])
-                parsed_json["span_errors"] = (
-                    self._validate_and_fix_span_errors(raw_span_errors, block.text)
-                    if isinstance(raw_span_errors, list)
-                    else []
-                )
-                status = parsed_json.get("status", "sesuai")
-                if status not in ["sesuai", "perlu_revisi", "ejaan_tanda_baca", "tidak_ditemukan_rujukan"]:
-                    status = "sesuai" if retrieved_chunks else "tidak_ditemukan_rujukan"
-                parsed_json["status"] = status
-                self._sanitize_rule_reference(parsed_json)
-                result = BlockReviewResult(**parsed_json)
-                if (result.status in ["sesuai", "perlu_revisi"]) and not result.rule_reference and retrieved_chunks:
-                    top_c = retrieved_chunks[0]
-                    result.rule_reference = RuleReference(
-                        document=top_c.document_name,
-                        page=top_c.page_number,
-                        section=top_c.section_title,
-                    )
-                if result.status == "sesuai" and len(result.span_errors) > 0:
-                    has_pedoman = any(e.error_type == "pedoman" for e in result.span_errors)
-                    result.status = "perlu_revisi" if has_pedoman else "ejaan_tanda_baca"
+                result = self._parse_review_response(groq_content, block, retrieved_chunks)
                 logger.info(f"Groq fallback successfully reviewed block {block.block_id}")
                 return result
             except Exception as ge:
                 logger.error(f"Groq fallback also failed for block {block.block_id}: {ge}")
 
-        # Intelligent deterministic fallback on API error:
-        # If chunks were retrieved, mark as 'sesuai' with reference rather than failing completely
+        # Semua provider (OpenRouter primary, 9router, Groq) sudah dicoba dan
+        # GAGAL semua untuk blok ini. Sebelumnya di sini blok ditandai "sesuai"
+        # (kalau ada rujukan) — menyesatkan karena kelihatan seperti sudah lolos
+        # pemeriksaan AI padahal belum pernah benar-benar dianalisis sama sekali.
+        # Sekarang eksplisit ditandai "gagal_dianalisis" supaya pengguna tahu
+        # blok ini butuh pengecekan manual, bukan dianggap otomatis aman.
+        error_summary = str(last_exception)[:200] if last_exception else "tidak diketahui"
+        issue_msg = (
+            f"Gagal dianalisis: semua provider LLM (OpenRouter, fallback, Groq) gagal "
+            f"merespons untuk blok ini. Blok BELUM diperiksa AI — mohon tinjau manual. "
+            f"(Error terakhir: {error_summary})"
+        )
+
         if retrieved_chunks:
             top_c = retrieved_chunks[0]
             return BlockReviewResult(
                 block_id=block.block_id,
                 original_text=block.text,
-                status="sesuai",
-                issue=None,
+                status="gagal_dianalisis",
+                issue=issue_msg,
                 rule_reference=RuleReference(
                     document=top_c.document_name,
                     page=top_c.page_number,
@@ -517,8 +500,8 @@ class OpenRouterReviewer:
             return BlockReviewResult(
                 block_id=block.block_id,
                 original_text=block.text,
-                status="tidak_ditemukan_rujukan",
-                issue="Tidak ditemukan potongan pedoman yang relevan.",
+                status="gagal_dianalisis",
+                issue=issue_msg,
                 rule_reference=None,
                 suggested_revision=None,
                 span_errors=[],

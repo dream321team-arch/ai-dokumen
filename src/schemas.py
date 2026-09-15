@@ -26,8 +26,14 @@ class BlockReviewResult(BaseModel):
     block_id: str = Field(..., description="ID unik dari blok yang diperiksa")
     page_number: Optional[int] = Field(default=1, description="Nomor halaman dokumen upload")
     original_text: str = Field(..., description="Teks asli dari blok dokumen upload")
-    status: Literal["sesuai", "perlu_revisi", "ejaan_tanda_baca", "tidak_ditemukan_rujukan"] = Field(
-        ..., description="Status hasil pemeriksaan kepatuhan dan kebahasaan"
+    status: Literal[
+        "sesuai", "perlu_revisi", "ejaan_tanda_baca", "tidak_ditemukan_rujukan", "gagal_dianalisis"
+    ] = Field(
+        ..., description=(
+            "Status hasil pemeriksaan kepatuhan dan kebahasaan. 'gagal_dianalisis' khusus "
+            "dipakai sistem (bukan oleh LLM) saat SEMUA provider LLM gagal merespons — blok "
+            "ini belum benar-benar diperiksa, jangan dianggap sama dengan 'sesuai'."
+        )
     )
     issue: Optional[str] = Field(
         None, description="Detail ketidaksesuaian atau masalah utama yang ditemukan"
