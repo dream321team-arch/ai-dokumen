@@ -129,7 +129,7 @@ class OpenRouterReviewer:
                         "HTTP-Referer": "http://localhost:8000",
                         "X-Title": "AI Document Checker",
                     },
-                    timeout=20.0,
+                    timeout=60.0,
                 )
                 logger.info("OpenRouter fallback client initialized in Reviewer")
             except Exception as fe:
@@ -141,7 +141,7 @@ class OpenRouterReviewer:
                 self.groq_client = OpenAI(
                     base_url=settings.GROQ_BASE_URL,
                     api_key=settings.GROQ_API_KEY.strip(),
-                    timeout=20.0,
+                    timeout=60.0,
                 )
                 logger.info("Groq fallback client initialized in Reviewer")
             except Exception as ge:
@@ -161,7 +161,7 @@ class OpenRouterReviewer:
                 base_url=self.base_url,
                 api_key=self.api_key.strip(),
                 default_headers=extra_headers,
-                timeout=20.0,
+                timeout=60.0,
             )
             logger.info(f"OpenRouter client initialized successfully (model: {self.model or 'auto-routing'})")
         except Exception as e:
