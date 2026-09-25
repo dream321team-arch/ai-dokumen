@@ -113,7 +113,7 @@ def main():
         # Render (and most PaaS) set RENDER=true in their build/runtime env - use
         # that to auto-disable the dev-only file watcher/auto-reload in production,
         # without needing a separate flag for local vs. deployed runs.
-        is_production = bool(os.environ.get("RENDER"))
+        is_production = bool(os.environ.get("RENDER") or os.environ.get("NO_RELOAD"))
         print(f"[*] Starting AI Document Checker Web Server on http://{args.host}:{args.port}")
         print("[*] Tekan CTRL+C untuk menghentikan server.")
         try:
