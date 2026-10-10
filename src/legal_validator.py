@@ -81,6 +81,10 @@ def validate_legal_structure_and_sentences(blocks: List[Block]) -> Dict[str, Any
     }
 
 
+# Bila kurang dari ambang ini blok yang berhasil diperiksa, dokumen tidak diberi grade.
+MIN_COVERAGE_FOR_GRADE = 0.8
+
+
 def calculate_compliance_score(summary: Dict[str, Any], legal_metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Computes a 0-100% Comprehensive Compliance & Quality Score and Grade:
@@ -89,7 +93,13 @@ def calculate_compliance_score(summary: Dict[str, Any], legal_metrics: Optional[
     - Punctuation & Vocabulary (Weight 15%)
     - Legal Draft Structure (Weight 10%)
     """
-    total_blocks = max(1, summary.get("total_blocks", 1))
+    total_all = max(1, summary.get("total_blocks", 1))
+    gagal_blocks = min(total_all, max(0, summary.get("gagal_dianalisis", 0)))
+    # Blok yang gagal diperiksa tidak punya data kesalahan sama sekali, sehingga tidak boleh
+    # dianggap "bersih". Rasio kesalahan dihitung hanya terhadap blok yang benar-benar diperiksa,
+    # dan cakupan pemeriksaan dilaporkan terpisah (lihat bagian penentuan grade).
+    total_blocks = max(1, total_all - gagal_blocks)
+    coverage = (total_all - gagal_blocks) / total_all
     revisi_blocks = summary.get("perlu_revisi", 0)
     ejaan_blocks = summary.get("ejaan_tanda_baca", 0)
     total_errors = summary.get("total_span_errors", 0)
@@ -142,14 +152,31 @@ def calculate_compliance_score(summary: Dict[str, Any], legal_metrics: Optional[
         grade = "E"
         predicate = "Kritis (Perlu Revisi Total)"
 
+    # Cakupan pemeriksaan: skor dari dokumen yang sebagian/seluruhnya gagal diperiksa tidak boleh
+    # tampil seperti dokumen bersih (dulu 36 dari 36 blok gagal tetap mendapat Grade A).
+    sub_scores = {
+        "pedoman_score": round(pedoman_score, 1),
+        "ejaan_score": round(ejaan_score, 1),
+        "tanda_baca_kosa_kata_score": round(punct_vocab_score, 1),
+        "struktur_hukum_score": round(struct_score, 1),
+        "cakupan_pemeriksaan": round(coverage * 100.0, 1),
+    }
+    if gagal_blocks:
+        catatan = f"{gagal_blocks} dari {total_all} blok gagal diperiksa"
+        if coverage == 0:
+            overall_score = 0.0
+            grade = "-"
+            predicate = "Belum dapat dinilai: seluruh blok gagal diperiksa"
+            sub_scores = {k: 0.0 for k in sub_scores}
+        elif coverage < MIN_COVERAGE_FOR_GRADE:
+            grade = "-"
+            predicate = f"Belum dapat dinilai: {catatan}"
+        else:
+            predicate = f"{predicate} ({catatan})"
+
     return {
         "overall_score": overall_score,
         "grade": grade,
         "predicate": predicate,
-        "sub_scores": {
-            "pedoman_score": round(pedoman_score, 1),
-            "ejaan_score": round(ejaan_score, 1),
-            "tanda_baca_kosa_kata_score": round(punct_vocab_score, 1),
-            "struktur_hukum_score": round(struct_score, 1),
-        }
+        "sub_scores": sub_scores,
     }

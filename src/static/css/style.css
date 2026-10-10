@@ -957,6 +957,7 @@ main {
 .status-badge.perlu_revisi { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger-border); }
 .status-badge.ejaan_tanda_baca { background: var(--yellow-soft); color: var(--accent-yellow-hover); border: 1px solid var(--yellow-border); }
 .status-badge.tidak_ditemukan_rujukan { background: #f1f5f9; color: var(--text-muted); border: 1px solid var(--border-color); }
+.status-badge.gagal_dianalisis { background: var(--danger-bg); color: var(--danger); border: 1px dashed var(--danger); }
 
 .original-text-box {
   background: #f8fafc;

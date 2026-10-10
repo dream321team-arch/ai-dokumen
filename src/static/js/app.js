@@ -394,20 +394,20 @@ function renderReport(report) {
 
     if (circleVal) circleVal.textContent = Math.round(score.overall_score);
     if (gradeBadge) gradeBadge.textContent = score.grade;
-    if (predText) predText.textContent = `Grade ${score.grade} - ${score.predicate}`;
+    if (predText) predText.textContent = score.grade === '-' ? score.predicate : `Grade ${score.grade} - ${score.predicate}`;
 
     if (score.sub_scores) {
       if (document.getElementById('sub-score-pedoman')) {
-        document.getElementById('sub-score-pedoman').textContent = `${Math.round(score.sub_scores.pedoman_score || 100)}%`;
+        document.getElementById('sub-score-pedoman').textContent = `${Math.round(score.sub_scores.pedoman_score ?? 100)}%`;
       }
       if (document.getElementById('sub-score-ejaan')) {
-        document.getElementById('sub-score-ejaan').textContent = `${Math.round(score.sub_scores.ejaan_score || 100)}%`;
+        document.getElementById('sub-score-ejaan').textContent = `${Math.round(score.sub_scores.ejaan_score ?? 100)}%`;
       }
       if (document.getElementById('sub-score-punct')) {
-        document.getElementById('sub-score-punct').textContent = `${Math.round(score.sub_scores.tanda_baca_kosa_kata_score || 100)}%`;
+        document.getElementById('sub-score-punct').textContent = `${Math.round(score.sub_scores.tanda_baca_kosa_kata_score ?? 100)}%`;
       }
       if (document.getElementById('sub-score-struct')) {
-        document.getElementById('sub-score-struct').textContent = `${Math.round(score.sub_scores.struktur_hukum_score || 100)}%`;
+        document.getElementById('sub-score-struct').textContent = `${Math.round(score.sub_scores.struktur_hukum_score ?? 100)}%`;
       }
     }
   }
@@ -601,6 +601,7 @@ function renderBlocks(blocks, filter) {
     if (b.status === 'perlu_revisi') statusLabel = '<i class="fa-solid fa-triangle-exclamation"></i> Perlu Revisi';
     if (b.status === 'ejaan_tanda_baca') statusLabel = '<i class="fa-solid fa-spell-check"></i> Ejaan & Tanda Baca';
     if (b.status === 'tidak_ditemukan_rujukan') statusLabel = '<i class="fa-solid fa-circle-question"></i> Tanpa Rujukan';
+    if (b.status === 'gagal_dianalisis') statusLabel = '<i class="fa-solid fa-circle-exclamation"></i> Gagal Dianalisis';
 
     let issueHTML = '';
     if (b.issue) {
