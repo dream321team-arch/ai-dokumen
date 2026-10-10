@@ -67,5 +67,13 @@ class Settings:
     # Mencegah beberapa pengguna bersamaan melewati batas laju penyedia model.
     AI_MAX_CONCURRENT_LLM: int = max(1, int(os.getenv("AI_MAX_CONCURRENT_LLM", "16")))
 
+    # Simpan file .docx asli yang diunggah (untuk ekspor "Naskah Asli + Komentar"). BAWAAN MATI:
+    # tanpa login di depan /ai-api, file asli yang tersimpan bisa diunduh siapa saja yang
+    # mengetahui hash di laporan (riwayat laporan terbuka). Nyalakan hanya di lingkungan
+    # tertutup (mis. laptop pengembang) atau setelah layanan AI dilindungi login.
+    AI_STORE_SOURCE_FILES: bool = os.getenv("AI_STORE_SOURCE_FILES", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
 
 settings = Settings()

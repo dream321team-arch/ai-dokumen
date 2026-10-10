@@ -82,6 +82,8 @@ def _store_source_if_docx(path: Path, filename: str) -> Optional[str]:
     Hanya .docx yang disimpan karena komentar Word hanya bisa ditempel ke format itu.
     Kegagalan menyimpan tidak boleh menggagalkan pemeriksaan, jadi cukup mengembalikan None.
     """
+    if not settings.AI_STORE_SOURCE_FILES:
+        return None
     if path.suffix.lower() != ".docx":
         return None
     try:
@@ -123,6 +125,7 @@ async def get_status():
         "guideline_files_count": len(guidelines),
         "guideline_files": guidelines,
         "supported_formats": list(SUPPORTED_EXTENSIONS),
+        "source_files_enabled": settings.AI_STORE_SOURCE_FILES,
         "chroma_dir": settings.CHROMA_PERSIST_DIR,
     }
 
@@ -309,6 +312,12 @@ async def export_report_to_docx(req: ExportDocxRequest):
     extra_headers: Dict[str, str] = {}
 
     if req.mode == "comments":
+        if not settings.AI_STORE_SOURCE_FILES:
+            raise HTTPException(
+                status_code=403,
+                detail="Ekspor Naskah Asli + Komentar dimatikan di server ini. "
+                       "Gunakan Track Changes atau Laporan Audit, atau hubungi administrator.",
+            )
         if Path(report_obj.document_checked).suffix.lower() != ".docx":
             raise HTTPException(
                 status_code=400,

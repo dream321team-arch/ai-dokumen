@@ -30,6 +30,9 @@ async function checkSystemStatus() {
   try {
     const res = await fetch('api/status');
     const data = await res.json();
+    // Ekspor "Naskah Asli + Komentar" hanya ditawarkan bila server menyimpan file asli.
+    const commentsItem = document.getElementById('export-comments-item');
+    if (commentsItem) commentsItem.style.display = data.source_files_enabled ? '' : 'none';
     if (data.openrouter_configured) {
       statusText.textContent = `AI Ready | ${data.indexed_chunks} Chunks`;
     } else {
