@@ -59,5 +59,13 @@ class Settings:
     RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "20"))
     RERANK_TOP_N: int = int(os.getenv("RERANK_TOP_N", "5"))
 
+    # Jumlah blok yang diperiksa paralel per dokumen. Waktunya habis menunggu jawaban
+    # model, bukan memakai CPU/RAM, jadi batas praktisnya adalah batas laju API. Di Render
+    # free tier (512MB) pernah harus 1; di server dengan RAM lega aman dinaikkan.
+    AI_MAX_WORKERS: int = max(1, int(os.getenv("AI_MAX_WORKERS", "5")))
+    # Batas TOTAL panggilan LLM serentak dari semua pemeriksaan sekaligus (lihat llm_limiter.py).
+    # Mencegah beberapa pengguna bersamaan melewati batas laju penyedia model.
+    AI_MAX_CONCURRENT_LLM: int = max(1, int(os.getenv("AI_MAX_CONCURRENT_LLM", "16")))
+
 
 settings = Settings()

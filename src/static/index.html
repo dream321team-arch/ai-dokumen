@@ -10,7 +10,7 @@
   <!-- Marked.js & DOMPurify for rich markdown formatting -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.5/purify.min.js"></script>
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="static/css/style.css">
 </head>
 <body>
 
@@ -86,6 +86,9 @@
               </a>
               <a href="javascript:void(0)" onclick="downloadExport('audit_report')">
                 <i class="fa-solid fa-file-invoice" style="color: #16a34a;"></i> Laporan Audit Eksekutif (.docx)
+              </a>
+              <a href="javascript:void(0)" onclick="downloadExport('comments')" title="Dokumen asli tanpa perubahan margin/format, bagian yang salah diberi komentar Word (hanya untuk file .docx)">
+                <i class="fa-solid fa-comment-dots" style="color: #7c3aed;"></i> Naskah Asli + Komentar (Word .docx)
               </a>
               <a href="javascript:void(0)" onclick="exportJSONReport()">
                 <i class="fa-solid fa-code" style="color: #64748b;"></i> Data Mentah (JSON)
@@ -388,6 +391,6 @@
     </div>
   </footer>
 
-  <script src="/static/js/app.js"></script>
+  <script src="static/js/app.js"></script>
 </body>
 </html>

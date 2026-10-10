@@ -28,7 +28,7 @@ async function checkSystemStatus() {
   if (!statusText) return; // Guard clause untuk mencegah error
   
   try {
-    const res = await fetch('/api/status');
+    const res = await fetch('api/status');
     const data = await res.json();
     if (data.openrouter_configured) {
       statusText.textContent = `AI Ready | ${data.indexed_chunks} Chunks`;
@@ -117,7 +117,7 @@ async function loadRefSelectionCheckboxes() {
   const listEl = document.getElementById('ref-selection-list');
   if (!listEl) return;
   try {
-    const res = await fetch('/api/guidelines');
+    const res = await fetch('api/guidelines');
     const data = await res.json();
     refSelectionFiles = (data.guidelines || []).map(g => g.name);
 
@@ -218,7 +218,7 @@ async function processDocFile(file) {
   };
 
   try {
-    const startRes = await fetch('/api/check/start', { method: 'POST', body: formData });
+    const startRes = await fetch('api/check/start', { method: 'POST', body: formData });
     if (!startRes.ok) {
       const errData = await startRes.json();
       throw new Error(errData.detail || 'Gagal memulai pemeriksaan dokumen.');
@@ -239,7 +239,7 @@ async function processDocFile(file) {
     refCheckJobPoller = setInterval(async () => {
       let statusRes;
       try {
-        statusRes = await fetch(`/api/check/status/${job_id}`);
+        statusRes = await fetch(`api/check/status/${job_id}`);
       } catch (networkErr) {
         // Server lagi restart/nggak bisa dihubungi sesaat - kegagalan jaringan
         // begini juga ditoleransi dulu, sama seperti respons non-OK di bawah.
@@ -293,20 +293,8 @@ async function processDocFile(file) {
           clearInterval(refCheckJobPoller);
           refCheckJobPoller = null;
 
-          const report = job.report;
-          currentReportData = report;
-          acceptedBlockRevisions.clear();
-          report.blocks.forEach(b => {
-            if (b.suggested_revision) acceptedBlockRevisions.add(b.block_id);
-          });
-
           loadingContainer.style.display = 'none';
-          dropZone.style.display = 'block';
-          statsSummary.style.display = 'grid';
-          if (scoreBanner) scoreBanner.style.display = 'flex';
-          resultsWrapper.style.display = 'block';
-
-          renderReport(report);
+          showReport(job.report);
           checkSystemStatus();
         } else if (job.status === 'error') {
           clearInterval(refCheckJobPoller);
@@ -325,6 +313,45 @@ async function processDocFile(file) {
   } catch (err) {
     resetToUploadState();
     alert(`Error: ${err.message}`);
+  }
+}
+
+// Tampilkan laporan di tab Pemeriksaan. Dipakai oleh hasil pemeriksaan baru
+// dan oleh Riwayat Laporan, sehingga tampilannya selalu sama.
+function showReport(report) {
+  currentReportData = report;
+  activeContextBlock = null;
+  acceptedBlockRevisions.clear();
+  (report.blocks || []).forEach(b => {
+    if (b.suggested_revision) acceptedBlockRevisions.add(b.block_id);
+  });
+
+  document.getElementById('loading-container').style.display = 'none';
+  document.getElementById('drop-zone').style.display = 'block';
+  document.getElementById('stats-summary').style.display = 'grid';
+  const scoreBanner = document.getElementById('score-banner');
+  if (scoreBanner) scoreBanner.style.display = 'flex';
+  document.getElementById('results-wrapper').style.display = 'block';
+
+  renderReport(report);
+}
+
+// Buka laporan dari Riwayat Laporan dengan tampilan yang sama seperti hasil pemeriksaan baru.
+async function openHistoryReport(historyId, event) {
+  if (event) event.stopPropagation();
+  try {
+    const res = await fetch(`api/reports/${encodeURIComponent(historyId)}`);
+    if (!res.ok) throw new Error('Laporan tidak ditemukan atau gagal dimuat.');
+    let report = await res.json();
+    if (typeof report === 'string') report = JSON.parse(report);
+    if (!report || !Array.isArray(report.blocks)) throw new Error('Format laporan tidak dikenali.');
+
+    switchTab('tab-check');
+    showReport(report);
+    filterResults('all');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } catch (err) {
+    alert(`Gagal membuka laporan: ${err.message}`);
   }
 }
 
@@ -767,13 +794,19 @@ async function downloadExport(mode) {
       accepted_block_ids: Array.from(acceptedBlockRevisions),
     };
 
-    const res = await fetch('/api/export-docx', {
+    const res = await fetch('api/export-docx', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
 
-    if (!res.ok) throw new Error('Gagal mengekspor file DOCX.');
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.detail || 'Gagal mengekspor file DOCX.');
+    }
+
+    const unplaced = parseInt(res.headers.get('X-Comments-Unplaced') || '0', 10);
+    const placed = parseInt(res.headers.get('X-Comments-Placed') || '0', 10);
 
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -784,9 +817,19 @@ async function downloadExport(mode) {
       ? `${baseName}_track_changes.docx`
       : mode === 'audit_report'
       ? `${baseName}_laporan_audit.docx`
+      : mode === 'comments'
+      ? `${baseName}_dengan_komentar.docx`
       : `${baseName}_naskah_bersih.docx`;
     a.click();
     URL.revokeObjectURL(url);
+
+    if (mode === 'comments') {
+      alert(
+        unplaced > 0
+          ? `Dokumen berkomentar diunduh: ${placed} komentar ditempel, ${unplaced} catatan tidak bisa ditempatkan di teks (cek Laporan Audit untuk daftar lengkapnya).`
+          : `Dokumen berkomentar diunduh: ${placed} komentar ditempel di dokumen asli.`
+      );
+    }
   } catch (err) {
     alert(`Export Error: ${err.message}`);
   }
@@ -1016,11 +1059,11 @@ async function sendChatMessage() {
     const payload = {
       message: message,
       chat_history: chatHistory,
-      document_context: currentReportData?.document_checked || '',
+      report: currentReportData || null,
       block_context: activeContextBlock ? activeContextBlock.original_text : null
     };
 
-    const res = await fetch('/api/assistant/chat', {
+    const res = await fetch('api/assistant/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -1085,7 +1128,7 @@ function copyChatResponse(btn) {
 async function loadGuidelines() {
   const tbody = document.getElementById('guidelines-table-body');
   try {
-    const res = await fetch('/api/guidelines');
+    const res = await fetch('api/guidelines');
     const data = await res.json();
     tbody.innerHTML = '';
 
@@ -1122,7 +1165,7 @@ async function handleRuleUpload(event) {
   }
 
   try {
-    const res = await fetch('/api/upload-guidelines', {
+    const res = await fetch('api/upload-guidelines', {
       method: 'POST',
       body: formData
     });
@@ -1140,7 +1183,7 @@ async function triggerReindex() {
   if (!confirm('Apakah Anda yakin ingin memproses ulang (re-index) seluruh file pedoman ke ChromaDB?')) return;
 
   try {
-    const res = await fetch('/api/index-guidelines', { method: 'POST' });
+    const res = await fetch('api/index-guidelines', { method: 'POST' });
     const data = await res.json();
 
     if (res.ok) {
@@ -1157,7 +1200,7 @@ async function triggerReindex() {
 async function loadHistory() {
   const tbody = document.getElementById('reports-table-body');
   try {
-    const res = await fetch('/api/reports');
+    const res = await fetch('api/reports');
     const data = await res.json();
     tbody.innerHTML = '';
 
@@ -1175,9 +1218,12 @@ async function loadHistory() {
         <td>${scoreStr}</td>
         <td>${r.grade ? escapeHTML(r.grade) : '-'}</td>
         <td>${dateStr}</td>
-        <td>
-          <a href="/api/reports/${encodeURIComponent(r.id)}" target="_blank" class="btn btn-secondary btn-sm">
-            <i class="fa-solid fa-eye"></i> Lihat JSON
+        <td style="white-space: nowrap;">
+          <button class="btn btn-primary btn-sm" data-id="${escapeHTML(String(r.id))}" onclick="openHistoryReport(this.dataset.id, event)">
+            <i class="fa-solid fa-eye"></i> Lihat Hasil
+          </button>
+          <a href="api/reports/${encodeURIComponent(r.id)}" target="_blank" class="btn btn-secondary btn-sm" title="Lihat data mentah (JSON)">
+            <i class="fa-solid fa-code"></i> JSON
           </a>
         </td>
       `;

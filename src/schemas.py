@@ -70,6 +70,10 @@ class CheckReport(BaseModel):
     compliance_score: Optional[ComplianceScoreInfo] = Field(None, description="Informasi skor kepatuhan naskah")
     legal_metrics: Optional[LegalStructureMetric] = Field(None, description="Hasil analisis struktur hukum dan kalimat")
     blocks: List[BlockReviewResult] = Field(..., description="Daftar hasil review per blok")
+    source_file_hash: Optional[str] = Field(
+        None,
+        description="SHA-256 isi file .docx asli (kunci ke source_store) untuk ekspor naskah asli + komentar",
+    )
 
 
 class Chunk(BaseModel):

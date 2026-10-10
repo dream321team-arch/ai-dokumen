@@ -23,6 +23,8 @@ from src.docx_exporter import export_clean_docx, export_track_changes_docx, expo
 from src.doc_assistant import DocumentAssistant
 from src.schemas import CheckReport
 from src.history_store import save_check_history, list_check_history, get_check_history_by_id
+from src.source_store import compute_sha256, save_source_file, get_source_file
+from src.docx_commenter import annotate_docx
 from src.job_store import create_job, update_job_progress, complete_job, fail_job, get_job
 
 logger = logging.getLogger(__name__)
@@ -63,14 +65,32 @@ active_runtime_model = settings.OPENROUTER_MODEL
 # tahan restart server (mis. instance Render free-tier yang bisa restart
 # mendadak) - progress tidak hilang begitu saja pas frontend lagi polling.
 # Nilai ini cuma dipakai sebagai estimasi ETA awal (sebelum ada data progress
-# nyata) - berdasarkan observasi run sungguhan, ~20-30 detik/request lebih
-# akurat daripada 8 detik yang lama.
-DEFAULT_SECONDS_PER_BLOCK = 25.0
+# nyata). Uji terukur dengan gpt-6-luna lewat OpenRouter: median ~4 detik per blok
+# (benchmark model lain 6-18 detik). 8 detik dipilih sebagai tebakan awal yang
+# agak konservatif; setelah blok pertama selesai, ETA memakai laju sebenarnya.
+DEFAULT_SECONDS_PER_BLOCK = 8.0
 
 
 def _is_supported_file(filename: str) -> bool:
     ext = Path(filename).suffix.lower()
     return ext in SUPPORTED_EXTENSIONS
+
+
+def _store_source_if_docx(path: Path, filename: str) -> Optional[str]:
+    """Simpan file .docx asli untuk ekspor "Naskah Asli + Komentar"; kembalikan hash-nya.
+
+    Hanya .docx yang disimpan karena komentar Word hanya bisa ditempel ke format itu.
+    Kegagalan menyimpan tidak boleh menggagalkan pemeriksaan, jadi cukup mengembalikan None.
+    """
+    if path.suffix.lower() != ".docx":
+        return None
+    try:
+        data = path.read_bytes()
+    except Exception as e:
+        logger.warning(f"Gagal membaca file asli '{filename}' untuk disimpan: {e}")
+        return None
+    sha = compute_sha256(data)
+    return sha if save_source_file(sha, filename, data) else None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -160,10 +180,12 @@ async def check_uploaded_document(file: UploadFile = File(...)):
     dest_path = input_dir / file.filename
     with open(dest_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+    source_hash = _store_source_if_docx(dest_path, file.filename)
 
     try:
         # Gunakan active_runtime_model (auto)
         report = check_document(str(dest_path), model_override=active_runtime_model)
+        report.source_file_hash = source_hash
 
         # Simpan ke riwayat Supabase - setiap run dapat baris sendiri, tidak
         # menimpa hasil sebelumnya walau nama dokumennya sama.
@@ -198,6 +220,9 @@ async def start_check_job(
     dest_path = input_dir / file.filename
     with open(dest_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+    # Hash dihitung sekarang (bukan di dalam thread job) supaya tidak tertukar bila file
+    # bernama sama diunggah lagi saat job ini masih berjalan.
+    source_hash = _store_source_if_docx(dest_path, file.filename)
 
     refs_list: Optional[List[str]] = None
     if selected_refs:
@@ -216,7 +241,7 @@ async def start_check_job(
         raise HTTPException(status_code=400, detail=f"Gagal membaca dokumen: {e}")
 
     job_id = uuid.uuid4().hex
-    max_workers = min(3, total_blocks) if total_blocks else 1  # samain dengan pipeline.py
+    max_workers = max(1, min(settings.AI_MAX_WORKERS, total_blocks)) if total_blocks else 1  # samain dengan pipeline.py
     initial_eta = (DEFAULT_SECONDS_PER_BLOCK * total_blocks / max_workers) if total_blocks else 0.0
 
     create_job(job_id, total_blocks=total_blocks, filename=file.filename, eta_seconds=initial_eta)
@@ -242,6 +267,7 @@ async def start_check_job(
                 selected_references=refs_list,
                 progress_callback=_on_progress,
             )
+            report.source_file_hash = source_hash
             # Simpan ke riwayat Supabase - setiap run dapat baris sendiri, tidak
             # menimpa hasil sebelumnya walau nama dokumennya sama.
             save_check_history(report)
@@ -280,8 +306,33 @@ async def export_report_to_docx(req: ExportDocxRequest):
         raise HTTPException(status_code=400, detail=f"Invalid report structure: {e}")
 
     filename_base = Path(report_obj.document_checked).stem
+    extra_headers: Dict[str, str] = {}
 
-    if req.mode == "track_changes":
+    if req.mode == "comments":
+        if Path(report_obj.document_checked).suffix.lower() != ".docx":
+            raise HTTPException(
+                status_code=400,
+                detail="Ekspor Naskah Asli + Komentar hanya tersedia untuk dokumen .docx. "
+                       "Untuk format lain, gunakan Track Changes atau Laporan Audit.",
+            )
+        source = get_source_file(report_obj.source_file_hash) if report_obj.source_file_hash else None
+        if not source:
+            raise HTTPException(
+                status_code=409,
+                detail="File .docx asli dokumen ini tidak tersimpan (diperiksa sebelum fitur ini ada). "
+                       "Unggah dan periksa ulang dokumennya, lalu ekspor lagi.",
+            )
+        try:
+            buf, stats = annotate_docx(source[1], report_obj)
+        except Exception as e:
+            logger.error(f"Gagal menempelkan komentar ke '{report_obj.document_checked}': {e}")
+            raise HTTPException(status_code=500, detail=f"Gagal membuat dokumen berkomentar: {e}")
+        filename = f"{filename_base}_dengan_komentar.docx"
+        extra_headers = {
+            "X-Comments-Placed": str(stats.placed),
+            "X-Comments-Unplaced": str(stats.unplaced),
+        }
+    elif req.mode == "track_changes":
         buf = export_track_changes_docx(report_obj)
         filename = f"{filename_base}_revisi_track_changes.docx"
     elif req.mode == "audit_report":
@@ -296,7 +347,7 @@ async def export_report_to_docx(req: ExportDocxRequest):
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', **extra_headers},
     )
 
 
@@ -305,6 +356,7 @@ class ChatRequest(BaseModel):
     chat_history: Optional[List[Dict[str, str]]] = None
     document_context: Optional[str] = None
     block_context: Optional[str] = None
+    report: Optional[Dict[str, Any]] = None
     model: Optional[str] = None
 
 
@@ -316,6 +368,7 @@ async def chat_with_assistant(req: ChatRequest):
         chat_history=req.chat_history,
         document_context=req.document_context,
         block_context=req.block_context,
+        report=req.report,
     )
     return {"reply": response_text}
 

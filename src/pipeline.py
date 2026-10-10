@@ -16,6 +16,7 @@ from src.chunker import (
 from src.vector_store import VectorStore
 from src.glossary_store import save_ketentuan_umum_definitions, load_ketentuan_umum_definitions
 from src.openrouter_reviewer import OpenRouterReviewer
+from src.llm_limiter import llm_limiter
 from src.legal_validator import validate_legal_structure_and_sentences, calculate_compliance_score
 from src.schemas import (
     CheckReport,
@@ -303,25 +304,27 @@ def check_document(
         if not reranked_chunks:
             reranked_chunks = best_fallback_chunks
 
-        review_res = reviewer.review_block(
-            block=block, retrieved_chunks=reranked_chunks, glossary_terms=glossary_terms
-        )
+        # Pembatas global: bila total panggilan LLM serentak (semua pengguna) sudah penuh,
+        # blok ini menunggu giliran. Hanya panggilan ke model yang dibatasi; pencarian
+        # rujukan di atas bersifat lokal dan ringan.
+        with llm_limiter.slot():
+            review_res = reviewer.review_block(
+                block=block, retrieved_chunks=reranked_chunks, glossary_terms=glossary_terms
+            )
         review_res.page_number = block.page_number
 
         review_res = _post_process_review(review_res, reranked_chunks)
         return review_res
 
-    # Gunakan multithreading untuk mempercepat pemrosesan. PERNAH dicoba naikkan
-    # ke 8 paralel, tapi ternyata akun OpenRouter baru punya batas ketat 20
-    # request/menit KHUSUS per model ("new-account-rpm") plus batas kredit
-    # gabungan untuk request yang lagi jalan bersamaan ("in_flight_budget") -
-    # di 8 paralel dua batas itu langsung kena, menyebabkan banyak block masuk
-    # retry/backoff panjang. Diturunkan lagi dari 3 ke 1 karena hosting Render
-    # free tier cuma 512MB RAM - 3 worker paralel (tiap satu nyimpan konteks
-    # chunk+prompt+response sendiri-sendiri) bikin instance OOM dan restart
-    # di tengah proses (lihat Render Events: "Instance failed"), bahkan untuk
-    # dokumen kecil. 1 worker = lebih lambat tapi tidak OOM.
-    max_workers = 1
+    # Gunakan multithreading untuk mempercepat pemrosesan. Jumlah worker diatur lewat
+    # AI_MAX_WORKERS (bawaan 5). Catatan riwayat: dulu pernah dicoba 8 paralel dan kena
+    # batas akun OpenRouter baru (20 request/menit per model "new-account-rpm" plus
+    # batas kredit permintaan serentak "in_flight_budget"), lalu diturunkan ke 1 karena
+    # hosting Render free tier cuma 512MB (3 worker bikin OOM). Di server dengan RAM lega
+    # memori bukan masalah (uji: 6 worker hanya menambah ~11MB). Uji terukur dengan
+    # gpt-6-luna: 1/2/4/6 worker = 12/23/44/57 blok per menit tanpa error 429. Bila
+    # muncul 429, turunkan AI_MAX_WORKERS di .env.
+    max_workers = max(1, min(settings.AI_MAX_WORKERS, len(blocks))) if blocks else 1
     block_results_map = {}
     completed_count = 0
 

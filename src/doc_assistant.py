@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
@@ -32,6 +33,119 @@ PEDOMAN FORMAT & GAYA KOMUNIKASI (SANGAT PENTING):
    - Selesaikan seluruh analisis sampai tuntas tanpa terpotong di tengah kalimat.
    - Akhiri dengan **Langkah Tindak Lanjut / Rekomendasi Aksi** yang konkret.
 """
+
+
+# Batas konteks dokumen yang dikirim ke model (karakter). Temuan didahulukan karena
+# paling sering ditanyakan; sisa jatah dipakai untuk isi naskah per blok.
+MAX_REPORT_CONTEXT_CHARS = 60000
+MAX_FINDINGS_CHARS = 30000
+
+
+def _format_span_error(se: Dict[str, Any]) -> str:
+    tipe = se.get("error_type") or "-"
+    tingkat = se.get("severity") or "-"
+    asli = (se.get("original_snippet") or "").strip()
+    saran = (se.get("suggested_snippet") or "").strip()
+    alasan = (se.get("explanation") or "").strip()
+    line = f"    - [{tipe}/{tingkat}] \"{asli}\""
+    if saran:
+        line += f" -> \"{saran}\""
+    if alasan:
+        line += f" ({alasan})"
+    return line
+
+
+def build_report_context(
+    report: Optional[Dict[str, Any]], max_chars: int = MAX_REPORT_CONTEXT_CHARS
+) -> str:
+    """Susun konteks dokumen aktif dari laporan hasil pemeriksaan (CheckReport sebagai dict).
+
+    Isinya: identitas dan skor, daftar temuan per blok, lalu isi naskah per blok.
+    Sebelumnya asisten hanya menerima nama file sehingga tidak bisa menjawab
+    pertanyaan seperti "kesalahan apa saja di dokumen tadi".
+    """
+    if not isinstance(report, dict):
+        return ""
+    blocks = report.get("blocks") or []
+    if not blocks:
+        return ""
+
+    skor = report.get("compliance_score") or {}
+    ringkasan = report.get("summary") or {}
+    metrik = report.get("legal_metrics") or {}
+
+    header = [f"Nama file: {report.get('document_checked', '-')}"]
+    if report.get("checked_at"):
+        header.append(f"Waktu pemeriksaan: {report['checked_at']}")
+    if skor:
+        header.append(
+            f"Skor kepatuhan: {skor.get('overall_score')} "
+            f"(grade {skor.get('grade')}, {skor.get('predicate')})"
+        )
+        sub = skor.get("sub_scores") or {}
+        if sub:
+            header.append("Sub-skor: " + ", ".join(f"{k}={v}" for k, v in sub.items()))
+    if ringkasan:
+        header.append("Ringkasan: " + ", ".join(f"{k}={v}" for k, v in ringkasan.items()))
+    if metrik:
+        header.append(
+            f"Struktur hukum: pasal terdeteksi={metrik.get('pasal_detected')}, "
+            f"peringatan hierarki={metrik.get('hierarchy_warnings')}, "
+            f"kalimat panjang={metrik.get('long_sentences_count')}"
+        )
+        for f in (metrik.get("findings") or [])[:20]:
+            header.append("  - " + (f if isinstance(f, str) else json.dumps(f, ensure_ascii=False))[:300])
+    header_text = "\n".join(header)
+
+    temuan = []
+    for b in blocks:
+        status = b.get("status")
+        spans = b.get("span_errors") or []
+        if status == "sesuai" and not spans:
+            continue
+        entry = [f"- {b.get('block_id')} (hal. {b.get('page_number', 1)}), status: {status}"]
+        if b.get("issue"):
+            entry.append(f"  Masalah: {b['issue']}")
+        ref = b.get("rule_reference") or {}
+        if ref.get("document"):
+            entry.append(f"  Rujukan: {ref.get('document')} hal. {ref.get('page')}")
+        if b.get("suggested_revision"):
+            entry.append(f"  Usulan revisi: {b['suggested_revision']}")
+        entry.extend(_format_span_error(se) for se in spans)
+        temuan.append("\n".join(entry))
+
+    temuan_text, dipotong_temuan = "", 0
+    for i, t in enumerate(temuan):
+        if len(temuan_text) + len(t) > MAX_FINDINGS_CHARS:
+            dipotong_temuan = len(temuan) - i
+            break
+        temuan_text += t + "\n"
+    if dipotong_temuan:
+        temuan_text += f"(... {dipotong_temuan} blok bertemuan lainnya tidak ditampilkan karena terlalu panjang)\n"
+    if not temuan_text:
+        temuan_text = "(Tidak ada temuan: seluruh blok dinyatakan sesuai.)\n"
+
+    jatah = max_chars - len(header_text) - len(temuan_text) - 300
+    naskah, terpakai, terpotong = [], 0, False
+    for b in blocks:
+        teks = (b.get("original_text") or "").strip()
+        if not teks:
+            continue
+        baris = f"[{b.get('block_id')} hal.{b.get('page_number', 1)}] {teks}"
+        if terpakai + len(baris) > jatah:
+            terpotong = True
+            break
+        naskah.append(baris)
+        terpakai += len(baris) + 1
+    naskah_text = "\n".join(naskah)
+    if terpotong:
+        naskah_text += "\n(... naskah dipotong karena terlalu panjang; sebagian akhir dokumen tidak terlihat)"
+
+    return (
+        f"{header_text}\n\n"
+        f"--- TEMUAN PEMERIKSAAN PER BLOK ---\n{temuan_text}\n"
+        f"--- ISI NASKAH (per blok) ---\n{naskah_text}"
+    )
 
 
 class DocumentAssistant:
@@ -73,9 +187,14 @@ class DocumentAssistant:
         chat_history: Optional[List[Dict[str, str]]] = None,
         document_context: Optional[str] = None,
         block_context: Optional[str] = None,
+        report: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Processes user consultation with contextual awareness of the active document and reference guidelines.
+
+        `report` adalah laporan pemeriksaan lengkap (hasil /api/check) dan dipakai untuk
+        menyusun konteks dokumen aktif. `document_context` hanya cadangan untuk klien lama
+        yang mengirim teks mentah.
         """
         if not self.client:
             return "Koneksi AI Assistant belum siap. Harap pastikan GROQ_API_KEY atau NVIDIA_API_KEY telah diisi di file .env."
@@ -86,8 +205,23 @@ class DocumentAssistant:
         guidelines_snippet = "\n".join([f"- ({c.document_name} Hal {c.page_number}): {c.text[:300]}" for c in guideline_chunks]) if guideline_chunks else "Tidak ada cuplikan pedoman spesifik."
 
         system_instruction = ASSISTANT_SYSTEM_PROMPT
-        if document_context:
+        report_context = build_report_context(report)
+        if report_context:
+            system_instruction += (
+                f"\n\n=== DOKUMEN AKTIF (HASIL PEMERIKSAAN & ISI NASKAH) ===\n{report_context}\n\n"
+                "Petunjuk: bagian TEMUAN adalah hasil pemeriksaan otomatis atas dokumen ini; pakai untuk "
+                "menjawab pertanyaan seperti \"kesalahan apa saja\". Bagian ISI NASKAH adalah teks asli per blok. "
+                "Jangan mengatakan dokumen tidak tersedia. Sebut ID blok dan halaman saat merujuk, dan "
+                "sampaikan keterbatasannya bila ada bagian yang dinyatakan dipotong."
+            )
+        elif document_context:
             system_instruction += f"\n\n=== DOKUMEN AKTIF ===\n{document_context[:3000]}"
+        else:
+            system_instruction += (
+                "\n\n=== DOKUMEN AKTIF ===\nBelum ada dokumen yang diperiksa pada sesi ini. Jika pengguna "
+                "menanyakan \"dokumen tadi\", minta mereka mengunggah dan memeriksa dokumen terlebih dahulu "
+                "di tab Pemeriksaan."
+            )
         if block_context:
             system_instruction += f"\n\n=== BLOK TEKS YANG DITANYAKAN ===\n{block_context}"
         if guidelines_snippet:
