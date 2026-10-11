@@ -4,8 +4,13 @@ WORKDIR /app
 
 # build-essential only for the rare wheel-less dependency; removed from the
 # final layer isn't worth multi-stage complexity here (image stays small enough).
+# tesseract-ocr(+ind/eng): OCR untuk PDF hasil scan. antiword: membaca file .doc (Word 97-2003).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    tesseract-ocr \
+    tesseract-ocr-ind \
+    tesseract-ocr-eng \
+    antiword \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

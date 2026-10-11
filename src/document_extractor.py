@@ -4,9 +4,16 @@ import gc
 import uuid
 import tempfile
 import logging
+import copy
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+from src.config import settings
+from src.doc_errors import DocumentReadError
+from src.legacy_formats import extract_doc_paragraphs, extract_odt_paragraphs
+from src.ocr import MIN_PAGE_TEXT_CHARS, ocr_pdf_pages, tesseract_available
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +82,7 @@ _PAGE_NUMBER_NOISE_RE = re.compile(
 )
 
 
-def _extract_pdf(path: Path) -> List[Dict[str, Any]]:
+def _extract_pdf(path: Path, allow_ocr: bool = True) -> List[Dict[str, Any]]:
     """
     Extract text from PDF page-by-page. Preserves bold/italic emphasis as
     lightweight markdown, extracts tables as markdown tables (instead of
@@ -134,6 +141,10 @@ def _extract_pdf(path: Path) -> List[Dict[str, Any]]:
         full_text = "\n\n".join(_merge_wrapped_lines_into_paragraphs(combined))
         pages.append({"page_number": page_idx + 1, "text": full_text})
 
+    # Halaman tanpa teks (hasil scan) dibaca dengan OCR; halaman bergambar yang sudah punya teks dibiarkan.
+    if allow_ocr:
+        _apply_ocr(doc, pages)
+    doc.close()
     return pages
 
 
@@ -366,53 +377,136 @@ def _convert_docx_to_pdf_via_word(path: Path) -> Optional[Path]:
             pythoncom.CoUninitialize()
 
 
-def extract_document_pages(file_path: str) -> List[Dict[str, Any]]:
+# ---------------------------------------------------------------------------
+# Titik masuk pembacaan dokumen
+# ---------------------------------------------------------------------------
+_OLE_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")  # penanda file Word 97-2003 (.doc)
+MIN_TOTAL_TEXT_CHARS = 20
+
+# Hasil pembacaan beberapa dokumen terakhir disimpan sementara: server membaca dokumen dua kali
+# (sekali untuk menghitung blok, sekali saat pemeriksaan), dan OCR tidak boleh dikerjakan dua kali.
+_CACHE_MAX = 3
+_cache: "OrderedDict[tuple, List[Dict[str, Any]]]" = OrderedDict()
+_cache_lock = threading.Lock()
+
+
+def _looks_binary(sample: str) -> bool:
+    """True bila teks didominasi karakter kendali / karakter pengganti (tanda file biner dibaca sebagai teks)."""
+    if not sample:
+        return False
+    bad = sum(1 for ch in sample if (ord(ch) < 32 and ch not in "\n\r\t") or ch == "�")
+    return bad / len(sample) > 0.02
+
+
+def _validate_pages(pages: List[Dict[str, Any]], path: Path) -> None:
+    """Tolak dokumen tanpa teks atau berisi data biner, supaya tidak diproses AI dan membuang kuota."""
+    total = sum(len(p.get("text", "").strip()) for p in pages)
+    if total < MIN_TOTAL_TEXT_CHARS:
+        if path.suffix.lower() == ".pdf":
+            raise DocumentReadError(
+                "Tidak ada teks yang bisa dibaca dari PDF ini. Kemungkinan PDF hasil scan dengan gambar yang terlalu "
+                "buram atau gelap sehingga OCR tidak mengenali tulisannya."
+            )
+        raise DocumentReadError("Tidak ada teks yang bisa dibaca dari dokumen ini.")
+    sample = " ".join(p.get("text", "") for p in pages)[:20000]
+    if _looks_binary(sample):
+        raise DocumentReadError(
+            "Isi file tampak berupa data biner, bukan teks dokumen. Pastikan formatnya sesuai ekstensi file, atau "
+            "simpan ulang sebagai .docx atau .pdf."
+        )
+
+
+def _apply_ocr(doc: Any, pages: List[Dict[str, Any]]) -> None:
+    """Baca dengan OCR halaman PDF yang tidak punya teks (hasil scan)."""
+    need = [i for i, p in enumerate(pages) if len(p["text"].strip()) < MIN_PAGE_TEXT_CHARS]
+    if not need:
+        return
+    has_any_text = any(len(p["text"].strip()) >= MIN_PAGE_TEXT_CHARS for p in pages)
+    if has_any_text and (not settings.AI_OCR_ENABLED or not tesseract_available()):
+        # Dokumen campuran dan OCR tidak ada: halaman bergambar dilewati, sisanya tetap diperiksa.
+        logger.warning(f"{len(need)} halaman PDF tanpa teks dilewati karena OCR tidak tersedia.")
+        return
+    # Melempar DocumentReadError bila OCR tidak tersedia (dokumen seluruhnya gambar) atau terlalu panjang.
+    ocr_pdf_pages(doc, pages, need)
+
+
+def _extract_word(path: Path) -> List[Dict[str, Any]]:
+    """Baca .docx / .doc. Mengenali isi sebenarnya (bukan hanya ekstensi): .doc yang ternyata .docx atau .rtf tetap terbaca."""
+    # 1) Windows dengan MS Word terpasang: konversi ke PDF agar nomor halaman persis seperti di Word.
+    pdf_path = _convert_docx_to_pdf_via_word(path)
+    if pdf_path is not None:
+        try:
+            pages = _extract_pdf(pdf_path, allow_ocr=False)
+            logger.info(
+                f"'{path.name}' dikonversi via MS Word ke PDF sementara untuk nomor halaman yang akurat ({len(pages)} halaman)."
+            )
+            return pages
+        except Exception as e:
+            logger.warning(f"Gagal membaca hasil konversi PDF ({e}), pakai estimasi halaman.")
+        finally:
+            try:
+                pdf_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    with open(path, "rb") as f:
+        head = f.read(8)
+    if head.startswith(b"{\\rtf"):
+        return _extract_rtf(path)
+    if head.startswith(_OLE_MAGIC):
+        return _split_text_to_pages("\n\n".join(extract_doc_paragraphs(path)))
+    try:
+        return _extract_docx(path)
+    except Exception as e:
+        logger.warning(f"Failed extracting DOCX via python-docx ({e}), trying text fallback.")
+        return _extract_plain_text(path)
+
+
+def _extract_uncached(path: Path, allow_ocr: bool) -> List[Dict[str, Any]]:
+    ext = path.suffix.lower()
+    logger.info(f"Extracting text from '{path.name}' (format: {ext})...")
+
+    if ext == ".pdf":
+        return _extract_pdf(path, allow_ocr=allow_ocr)
+    if ext in (".docx", ".doc"):
+        return _extract_word(path)
+    if ext == ".rtf":
+        return _extract_rtf(path)
+    if ext == ".odt":
+        return _split_text_to_pages("\n\n".join(extract_odt_paragraphs(path)))
+    # .txt, .md, dan format lain berbasis teks
+    return _extract_plain_text(path)
+
+
+def extract_document_pages(file_path: str, allow_ocr: bool = True, strict: bool = True) -> List[Dict[str, Any]]:
     """
-    Universal document reader that extracts text page-by-page from:
-    PDF, DOCX, DOC, TXT, MD, RTF, and ODT.
+    Pembaca dokumen universal: PDF (termasuk hasil scan lewat OCR), DOCX, DOC, TXT, MD, RTF, dan ODT.
 
     Args:
-        file_path: Path to the document.
+        file_path: Path dokumen.
+        allow_ocr: Baca halaman PDF tanpa teks dengan OCR. Dimatikan untuk indeks pedoman.
+        strict: Tolak dokumen tanpa teks / berisi data biner dengan DocumentReadError.
 
     Returns:
-        List of dicts: [{"page_number": int, "text": str}]
+        List of dicts: [{"page_number": int, "text": str, "ocr": True (hanya bila dibaca dengan OCR)}]
     """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"File dokumen tidak ditemukan di: {file_path}")
 
-    ext = path.suffix.lower()
-    logger.info(f"Extracting text from '{path.name}' (format: {ext})...")
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size, allow_ocr, strict)
+    with _cache_lock:
+        if key in _cache:
+            _cache.move_to_end(key)
+            return copy.deepcopy(_cache[key])
 
-    if ext == ".pdf":
-        return _extract_pdf(path)
-    elif ext in [".docx", ".doc"]:
-        pdf_path = _convert_docx_to_pdf_via_word(path)
-        if pdf_path is not None:
-            try:
-                pages = _extract_pdf(pdf_path)
-                logger.info(
-                    f"'{path.name}' dikonversi via MS Word ke PDF sementara "
-                    f"untuk nomor halaman yang akurat ({len(pages)} halaman)."
-                )
-                return pages
-            except Exception as e:
-                logger.warning(f"Gagal membaca hasil konversi PDF ({e}), pakai estimasi halaman.")
-            finally:
-                try:
-                    pdf_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+    pages = _extract_uncached(path, allow_ocr)
+    if strict:
+        _validate_pages(pages, path)
 
-        try:
-            return _extract_docx(path)
-        except Exception as e:
-            logger.warning(f"Failed extracting DOCX via python-docx ({e}), trying text fallback.")
-            return _extract_plain_text(path)
-    elif ext == ".rtf":
-        return _extract_rtf(path)
-    elif ext in [".txt", ".md", ".odt"]:
-        return _extract_plain_text(path)
-    else:
-        # Fallback to plain text reader for any text-like file
-        return _extract_plain_text(path)
+    with _cache_lock:
+        _cache[key] = pages
+        while len(_cache) > _CACHE_MAX:
+            _cache.popitem(last=False)
+    return copy.deepcopy(pages)

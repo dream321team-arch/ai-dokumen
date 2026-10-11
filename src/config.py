@@ -67,6 +67,13 @@ class Settings:
     # Mencegah beberapa pengguna bersamaan melewati batas laju penyedia model.
     AI_MAX_CONCURRENT_LLM: int = max(1, int(os.getenv("AI_MAX_CONCURRENT_LLM", "16")))
 
+    # OCR untuk PDF hasil scan (halaman berisi gambar tanpa teks), memakai Tesseract (lihat ocr.py).
+    AI_OCR_ENABLED: bool = os.getenv("AI_OCR_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+    AI_OCR_MAX_PAGES: int = max(1, int(os.getenv("AI_OCR_MAX_PAGES", "150")))
+    AI_OCR_DPI: int = max(100, int(os.getenv("AI_OCR_DPI", "200")))
+    AI_OCR_LANGS: str = os.getenv("AI_OCR_LANGS", "ind+eng")
+    AI_OCR_PAGE_TIMEOUT: int = max(10, int(os.getenv("AI_OCR_PAGE_TIMEOUT", "120")))
+
     # Simpan file .docx asli yang diunggah (untuk ekspor "Naskah Asli + Komentar"). BAWAAN MATI:
     # tanpa login di depan /ai-api, file asli yang tersimpan bisa diunduh siapa saja yang
     # mengetahui hash di laporan (riwayat laporan terbuka). Nyalakan hanya di lingkungan

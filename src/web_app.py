@@ -12,6 +12,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from src.config import settings
@@ -25,6 +26,7 @@ from src.schemas import CheckReport
 from src.history_store import save_check_history, list_check_history, get_check_history_by_id
 from src.source_store import compute_sha256, save_source_file, get_source_file
 from src.docx_commenter import annotate_docx
+from src.doc_errors import DocumentReadError
 from src.job_store import create_job, update_job_progress, complete_job, fail_job, get_job
 
 logger = logging.getLogger(__name__)
@@ -236,10 +238,14 @@ async def start_check_job(
         except Exception:
             logger.warning(f"Gagal parse selected_refs: {selected_refs}")
 
-    # Quick pre-extraction (no LLM calls) just to count blocks for an immediate ETA
+    # Pembacaan awal (tanpa LLM) untuk menghitung blok dan ETA, sekaligus menolak dokumen yang tidak terbaca
+    # dengan pesan jelas. Dijalankan di thread terpisah: OCR PDF hasil scan bisa memakan waktu lama dan tidak
+    # boleh membekukan seluruh server. Hasilnya disimpan sementara sehingga pemeriksaan tidak mengulang OCR.
     try:
-        pages = extract_document_pages(str(dest_path))
+        pages = await run_in_threadpool(extract_document_pages, str(dest_path))
         total_blocks = len(split_into_blocks(pages))
+    except DocumentReadError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Gagal membaca dokumen: {e}")
 
@@ -372,7 +378,9 @@ class ChatRequest(BaseModel):
 @app.post("/api/assistant/chat")
 async def chat_with_assistant(req: ChatRequest):
     assistant = DocumentAssistant()
-    response_text = assistant.chat(
+    # Panggilan model bersifat memblokir (beberapa detik); jalankan di thread agar server tetap melayani yang lain.
+    response_text = await run_in_threadpool(
+        assistant.chat,
         user_message=req.message,
         chat_history=req.chat_history,
         document_context=req.document_context,

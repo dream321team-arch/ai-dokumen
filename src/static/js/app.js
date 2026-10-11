@@ -421,6 +421,14 @@ function renderReport(report) {
     document.getElementById('issue-count-badge').textContent = `${issueCount} Blok Masalah | ${totalSpanErrors} Kesalahan`;
   }
 
+  // Catatan cara dokumen dibaca (mis. halaman dibaca dengan OCR); textContent mencegah HTML dari server dieksekusi.
+  const notesEl = document.getElementById('extraction-notes');
+  if (notesEl) {
+    const notes = report.extraction_notes || [];
+    notesEl.textContent = notes.join(' ');
+    notesEl.style.display = notes.length ? 'block' : 'none';
+  }
+
   renderTurnitinDocument(report.blocks, currentFilter);
   renderBlocks(report.blocks, currentFilter);
 }

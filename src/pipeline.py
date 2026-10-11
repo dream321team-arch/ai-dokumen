@@ -89,7 +89,8 @@ def index_pedoman(rules_dir: str) -> int:
         logger.info(f"Processing pedoman: {file_name}")
 
         try:
-            pages = extract_document_pages(str(doc_path))
+            # Pedoman tidak dibaca dengan OCR dan tidak divalidasi ketat: perilaku indeks tetap seperti sebelumnya.
+            pages = extract_document_pages(str(doc_path), allow_ocr=False, strict=False)
             chunks = chunk_pedoman(pages, document_name=file_name)
 
             if chunks:
@@ -198,6 +199,13 @@ def check_document(
     logger.info(f"Starting compliance check for document: '{input_path.name}'...")
 
     pages = extract_document_pages(str(input_path))
+    ocr_pages = [p["page_number"] for p in pages if p.get("ocr")]
+    extraction_notes: List[str] = []
+    if ocr_pages:
+        extraction_notes.append(
+            f"{len(ocr_pages)} dari {len(pages)} halaman dibaca dengan OCR (pengenalan teks dari gambar). "
+            "Kesalahan ejaan yang ditemukan bisa berasal dari salah baca OCR; periksa kembali ke dokumen asli."
+        )
     blocks = split_into_blocks(pages)
 
     # Step 1: Legal structure & Sentence complexity validation
@@ -404,6 +412,7 @@ def check_document(
         document_checked=input_path.name,
         checked_at=datetime.now(),
         summary=summary_counts,
+        extraction_notes=extraction_notes,
         compliance_score=compliance_info,
         legal_metrics=legal_metrics_info,
         blocks=block_results,
